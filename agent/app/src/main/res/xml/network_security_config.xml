@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  后台控制平台部署在内网、使用 HTTP（15650），Android 9+ 默认禁止明文流量，
+  故显式放行。生产若上 HTTPS，应改为仅放行指定域名。
+
+  注意：这里只影响 App 与后台之间的流量；抖音自身的流量由 Clash 接管，
+  不走此配置。
+-->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="true">
+        <trust-anchors>
+            <certificates src="system" />
+        </trust-anchors>
+    </base-config>
+</network-security-config>

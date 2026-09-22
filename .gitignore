@@ -1,0 +1,32 @@
+# ── 依赖与产物 ──
+node_modules/
+dist/
+build/
+*.log
+
+# ── 环境与运行数据 ──
+.env
+logs/
+data/
+
+# ── 临时调试脚本（沿用参考项目约定：_ 前缀）──
+_*.ts
+_*.js
+_*.py
+_*.ps1
+check_*.ts
+
+# ── Android ──
+.gradle/
+local.properties
+agent/app/build/
+agent/build/
+*.apk
+*.keystore
+!debug.keystore
+
+# ── 编辑器 ──
+.idea/
+.vscode/
+*.iml
+.DS_Store

@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">评论 Agent</string>
+    <string name="accessibility_label">评论 Agent 自动化服务</string>
+    <string name="accessibility_description">用于在设备上执行评论任务所需的界面识别与操作能力。开启后本应用才能读取抖音界面元素并执行点击与输入。</string>
+
+    <!-- 通知 -->
+    <string name="notify_channel_name">常驻服务</string>
+    <string name="notify_channel_desc">保持设备与后台的连接，接收任务并上报状态</string>
+    <string name="notify_title">评论 Agent 运行中</string>
+
+    <!-- 面板 -->
+    <string name="panel_title">设备状态</string>
+    <string name="btn_enroll">注册设备</string>
+    <string name="btn_selfcheck">自检</string>
+    <string name="btn_start">启动服务</string>
+    <string name="btn_stop">停止服务</string>
+    <string name="btn_open_accessibility">打开无障碍设置</string>
+    <string name="btn_battery">忽略电池优化</string>
+    <string name="hint_server">后台地址</string>
+    <string name="hint_secret">注册口令</string>
+</resources>

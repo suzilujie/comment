@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  无障碍服务配置（设计文档 §3.6）
+  · 监听抖音 + 常见桌面（launcher）：
+    桌面包名用于「点击图标启动」路径——该路径由 launcher 拉起应用，
+    **不受 Android 10+ / MIUI 的「后台启动 Activity」限制**，是最可靠的唤起方式。
+    若只监听抖音，则读不到桌面节点，图标入口必然超时失败。
+  · 必须开启 canRetrieveWindowContent（读控件树）与 canPerformGestures（手势注入）
+  · flagIncludeNotImportantViews：抖音部分可点元素被标记为 not important，必须包含
+-->
+<accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
+    android:accessibilityEventTypes="typeWindowStateChanged|typeWindowContentChanged|typeViewClicked|typeViewFocused"
+    android:accessibilityFeedbackType="feedbackGeneric"
+    android:accessibilityFlags="flagDefault|flagIncludeNotImportantViews|flagRetrieveInteractiveWindows|flagReportViewIds"
+    android:canPerformGestures="true"
+    android:canRetrieveWindowContent="true"
+    android:description="@string/accessibility_description"
+    android:notificationTimeout="100"
+    android:packageNames="com.ss.android.ugc.aweme,com.ss.android.ugc.aweme.lite,com.miui.home,com.android.launcher3,com.huawei.android.launcher,com.oppo.launcher,com.bbk.launcher2,com.sec.android.app.launcher"
+    android:settingsActivity="com.xfish.comment.agent.MainActivity" />
