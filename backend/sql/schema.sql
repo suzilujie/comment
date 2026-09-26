@@ -2,33 +2,16 @@
 -- comment backend — 数据库结构（幂等：可重复执行）
 -- 依据：设计文档 §3.8 数据模型 / §5.1 派单约束 / §5.4 任务状态机 / §6.5 人格档案
 -- 约定：实体主键 TEXT、明细主键 SERIAL、时间统一 TIMESTAMPTZ（UTC 存储）
+--
+-- 【2026-09-26 结构变更】移除「账号」实体，配额与计数全部下沉到设备维度：
+--   背景：一机一号且后台无需感知"设备上登录的是哪个抖音号"，
+--         故账号维度的所有约束（日上限 / 完成间隔 / 连续失败降额 / 同帖日一次）
+--         等价地改由设备维度承载。原 accounts 表的计数字段迁入 devices。
 -- ════════════════════════════════════════════════════════════════
 
--- ── 账号 ──────────────────────────────────────────────────────
-CREATE TABLE IF NOT EXISTS accounts (
-  id                TEXT PRIMARY KEY,
-  douyin_id         TEXT,
-  phone             TEXT,
-  status            TEXT NOT NULL DEFAULT 'active'
-                    CHECK (status IN ('active', 'paused', 'banned')),
-  daily_done        INTEGER NOT NULL DEFAULT 0,
-  daily_done_date   DATE,
-  -- 下次可派单时间 = 上次完成时间 + 随机 30~60 分钟（服务端权威）
-  next_eligible_at  TIMESTAMPTZ,
-  fail_streak       INTEGER NOT NULL DEFAULT 0,
-  total_success     INTEGER NOT NULL DEFAULT 0,
-  total_fail        INTEGER NOT NULL DEFAULT 0,
-  total_unknown     INTEGER NOT NULL DEFAULT 0,
-  remark            TEXT,
-  created_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-  updated_at        TIMESTAMPTZ NOT NULL DEFAULT NOW()
-);
-CREATE INDEX IF NOT EXISTS idx_accounts_eligible ON accounts (status, next_eligible_at);
-
--- ── 设备（一期一机一账号） ────────────────────────────────────
+-- ── 设备（设备即投放主体：唯一号 + 机型档案 + 配额计数） ──────
 CREATE TABLE IF NOT EXISTS devices (
   id                TEXT PRIMARY KEY,              -- 设备唯一号（Agent 首启生成 UUID）
-  account_id        TEXT REFERENCES accounts (id),
   -- 机型档案（多机型适配：规则包分槽依据）
   model             TEXT,
   resolution        TEXT,
@@ -56,6 +39,14 @@ CREATE TABLE IF NOT EXISTS devices (
   proxy_ok          BOOLEAN,
   battery           INTEGER,
   storage_free_mb   INTEGER,
+  -- 配额与节奏（原 accounts 表字段，2026-09-26 迁入）
+  daily_done        INTEGER NOT NULL DEFAULT 0,    -- 当日已派发条数
+  daily_done_date   DATE,                          -- 计数自然日（UTC+8 跨日重置）
+  next_eligible_at  TIMESTAMPTZ,                   -- 下次可派单时间 = 上次完成 + 随机 30~60 分钟
+  fail_streak       INTEGER NOT NULL DEFAULT 0,    -- 连续「账号类」失败次数（≥3 降额）
+  total_success     INTEGER NOT NULL DEFAULT 0,
+  total_fail        INTEGER NOT NULL DEFAULT 0,
+  total_unknown     INTEGER NOT NULL DEFAULT 0,
   -- 运行时
   busy_task_id      TEXT,
   state             JSONB,                         -- 其余状态快照（原始上报）
@@ -64,6 +55,8 @@ CREATE TABLE IF NOT EXISTS devices (
 );
 CREATE INDEX IF NOT EXISTS idx_devices_last_seen ON devices (last_seen_at DESC);
 CREATE INDEX IF NOT EXISTS idx_devices_city ON devices (last_ip_city);
+-- 派单准入扫描：管理态 + 下次可派单时间（原 idx_accounts_eligible 的设备版）
+CREATE INDEX IF NOT EXISTS idx_devices_eligible ON devices (admin_state, next_eligible_at);
 
 -- ── 帖子池（人工录入，按城市分桶） ────────────────────────────
 CREATE TABLE IF NOT EXISTS posts (
@@ -84,11 +77,10 @@ CREATE TABLE IF NOT EXISTS posts (
 CREATE UNIQUE INDEX IF NOT EXISTS uq_posts_url ON posts (url);
 CREATE INDEX IF NOT EXISTS idx_posts_city_status ON posts (city, status);
 
--- ── 任务（派发那一刻创建；5 态） ──────────────────────────────
+-- ── 任务（派发那一刻创建；5 态；按设备归因） ──────────────────
 CREATE TABLE IF NOT EXISTS tasks (
   id               TEXT PRIMARY KEY,
-  account_id       TEXT NOT NULL REFERENCES accounts (id),
-  device_id        TEXT REFERENCES devices (id),
+  device_id        TEXT REFERENCES devices (id),    -- 派发目标设备（归因主体）
   post_id          TEXT NOT NULL REFERENCES posts (id),
   status           TEXT NOT NULL DEFAULT 'dispatched'
                    CHECK (status IN ('dispatched', 'executing', 'succeeded',
@@ -112,7 +104,7 @@ CREATE TABLE IF NOT EXISTS tasks (
   created_at       TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 CREATE INDEX IF NOT EXISTS idx_tasks_status_deadline ON tasks (status, deadline_at);
-CREATE INDEX IF NOT EXISTS idx_tasks_account_time ON tasks (account_id, dispatched_at DESC);
+CREATE INDEX IF NOT EXISTS idx_tasks_device_time ON tasks (device_id, dispatched_at DESC);
 CREATE INDEX IF NOT EXISTS idx_tasks_post_time ON tasks (post_id, dispatched_at DESC);
 
 -- ── 任务事件流（追加写，用于归因与审计） ──────────────────────
@@ -196,9 +188,10 @@ CREATE TABLE IF NOT EXISTS city_pools (
 );
 CREATE UNIQUE INDEX IF NOT EXISTS uq_city_pools_slug ON city_pools (slug);
 
--- ── 人格档案（一账号一份，长期稳定；见 §6.5） ─────────────────
+-- ── 人格档案（一设备一份，长期稳定；见 §6.5） ─────────────────
+-- 2026-09-26：随账号实体移除，改为按设备挂载。
 CREATE TABLE IF NOT EXISTS personalities (
-  account_id    TEXT PRIMARY KEY REFERENCES accounts (id),
+  device_id     TEXT PRIMARY KEY REFERENCES devices (id),
   profile       JSONB NOT NULL,                    -- 各维度 μ/σ 与概率
   bands         JSONB,                             -- 各维度档位（用于分布校验）
   version       INTEGER NOT NULL DEFAULT 1,

@@ -16,20 +16,34 @@ import com.xfish.comment.agent.accessibility.NodeFinder
  */
 object DouyinLocators {
 
-    /** 评论区入口（帖子右下角评论图标 / "查看全部评论"） */
+    /**
+     * 评论区入口（帖子右下角评论图标 / "查看全部评论"）。
+     *
+     * ⚠ 真机实测（抖音 39.7.0 / Redmi K30，2026-09-26）：评论区**展开后**页面上存在
+     *    desc="缩小评论区" 的关闭按钮，会被宽泛候选 desc="评论" 误命中。因此：
+     *    ① desc 候选按「精确 → 宽泛」排序；
+     *    ② 调用方必须先判断面板是否已展开，再决定要不要点入口（见 SelfCheck / TaskExecutor）。
+     */
     val commentEntry = NodeFinder.Locator(
         textExact = listOf("评论"),
-        textContains = listOf("条评论", "查看全部评论", "说点什么"),
-        descContains = listOf("评论"),
+        textContains = listOf("条评论", "查看全部评论"),
+        descContains = listOf("查看评论", "评论按钮", "打开评论", "评论"),
     )
 
-    /** 打开评论输入框（占位提示文案；真机实测：「发条评论，说说你的感受」） */
+    /**
+     * 评论输入框（占位文案随抖音版本变化，实测记录）：
+     *  · 抖音 39.7.0（2026-09-26 实测）：text="分享你此刻的想法"，class=EditText，评论区唯一可编辑节点；
+     *  · 早期版本：text="发条评论，说说你的感受"。
+     * 末尾的 className 兜底：新文案尚未收录时仍能命中输入框。
+     */
     val commentInputEntry = NodeFinder.Locator(
         textContains = listOf(
+            "分享你此刻的想法",   // 抖音 39.7.0（K30 实测 2026-09-26）
             "发条评论", "说点什么", "留下你的精彩评论", "善语结善缘",
             "发表你的评论", "写评论", "抢首评", "友善评论",
         ),
         descContains = listOf("评论输入", "说点什么", "输入评论", "写评论"),
+        className = "android.widget.EditText",
     )
 
     /** 发送按钮 */

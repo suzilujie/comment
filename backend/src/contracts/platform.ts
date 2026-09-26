@@ -16,12 +16,11 @@ export const TaskImageSchema = z.object({
   sizeBytes: z.number().int().nonnegative().optional(),
 })
 
-/** 任务包（§4.1） */
+/** 任务包（§4.1）—— 2026-09-26 移除 accountId：配额与节奏已下沉到设备维度 */
 export const TaskPackageSchema = z.object({
   taskId: z.string().min(1),
   postId: z.string().min(1),
   postUrl: z.string().min(1),
-  accountId: z.string().min(1),
   actions: z.array(ActionSchema).min(1),
   commentType: z.enum(['text', 'image']),
   scriptText: z.string().min(1),

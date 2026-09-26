@@ -1,10 +1,14 @@
 /**
  * 派单约束（设计文档 §5.1 的 20 条）。
  *
- * 分五组：账号(1-6) / 设备(7-11) / 帖子(12-16) / 时段(17-18) / 系统(19-20)。
+ * 分组：设备(1-11) / 帖子(12-16) / 时段(17-18) / 系统(19-20)。
  * 全部在「领取接口被调用时」求解；调用顺序为「先廉价后昂贵」：
- *   账号 + 设备 + 时段 + 密度（廉价，绝大多数请求在这里被挡掉）
+ *   设备 + 配额 + 时段 + 密度（廉价，绝大多数请求在这里被挡掉）
  *   → 帖子与素材（需要多次查询）
+ *
+ * 2026-09-26 结构变更：原「账号组」约束（日上限 / 完成间隔 / 连续失败降额 / 同帖日一次）
+ * 随账号实体移除，等价地改由**设备维度**承载（一机一号，语义等价）。
+ * 原因码常量名（ACCOUNT_*）保留以保持对外口径稳定，含义即"该设备的投放主体"。
  */
 import { db } from '../db_pg.js'
 import { config } from '../config.js'
@@ -14,38 +18,9 @@ import type { ConstraintCheck } from '../types.js'
 import { NO_DISPATCH_REASONS } from '../types.js'
 import type { DeviceRow } from '../device/device_store.js'
 import { evaluateAvailability } from '../device/device_store.js'
+import { countDevicePostComments } from '../task/task_store.js'
 
 const log = createLogger('constraint')
-
-export interface AccountRow {
-  id: string
-  status: 'active' | 'paused' | 'banned'
-  daily_done: number
-  daily_done_date: string | null
-  next_eligible_at: Date | null
-  fail_streak: number
-}
-
-export async function getAccount(accountId: string): Promise<AccountRow | null> {
-  const sql = db()
-  const rows = (await sql`
-    SELECT id, status, daily_done, daily_done_date, next_eligible_at, fail_streak
-    FROM accounts WHERE id = ${accountId} LIMIT 1
-  `) as unknown as AccountRow[]
-  return rows[0] ?? null
-}
-
-/** 跨日重置日计数（按 UTC+8 自然日） */
-export async function ensureDailyCounter(account: AccountRow): Promise<number> {
-  const today = localDateKey()
-  if (account.daily_done_date === today) return account.daily_done
-  const sql = db()
-  await sql`
-    UPDATE accounts SET daily_done = 0, daily_done_date = ${today}::date, updated_at = NOW()
-    WHERE id = ${account.id}
-  `
-  return 0
-}
 
 // ── 设备组（7-11）─────────────────────────────────────────────
 /** 7-11：在线 / 健康（无障碍+前台服务+代理）/ 空闲 / 属地 / 版本达标 */
@@ -63,23 +38,22 @@ export async function checkDevice(device: DeviceRow): Promise<ConstraintCheck> {
   return { pass: false, reason: NO_DISPATCH_REASONS.DEVICE_UNHEALTHY }
 }
 
-// ── 账号组（1-3、5、6）────────────────────────────────────────
-/** 1、2、3、5、6：状态 / 日上限 / 完成间隔 / 健康度 / 在途唯一 */
-export async function checkAccount(account: AccountRow): Promise<ConstraintCheck & { retryAfterSeconds?: number }> {
-  if (account.status !== 'active') {
-    return { pass: false, reason: NO_DISPATCH_REASONS.ACCOUNT_NOT_ELIGIBLE }
-  }
+// ── 配额与节奏（原账号组 1/2/3/5，现设备维度）─────────────────
+/** 日上限 / 完成间隔 / 连续失败降额（字段已在 DeviceRow 上，无需额外查询） */
+export async function checkQuota(
+  device: DeviceRow,
+): Promise<ConstraintCheck & { retryAfterSeconds?: number }> {
   // 第 5 条：连续失败降额（连续 3 次后暂停派单，转人工）
-  if (account.fail_streak >= 3) {
+  if (device.fail_streak >= 3) {
     return { pass: false, reason: NO_DISPATCH_REASONS.ACCOUNT_NOT_ELIGIBLE }
   }
   // 第 2 条：日上限
-  const done = await ensureDailyCounter(account)
+  const done = await ensureDailyCounter(device)
   if (done >= config.dispatch.dailyQuotaPerAccount) {
     return { pass: false, reason: NO_DISPATCH_REASONS.ACCOUNT_DAILY_QUOTA, retryAfterSeconds: 1800 }
   }
   // 第 3 条：与上次「完成」的间隔（服务端权威）
-  const next = parseMs(account.next_eligible_at)
+  const next = parseMs(device.next_eligible_at)
   if (next !== null && nowMs() < next) {
     return {
       pass: false,
@@ -90,21 +64,35 @@ export async function checkAccount(account: AccountRow): Promise<ConstraintCheck
   return { pass: true }
 }
 
-/** 第 4 条：同账号 × 同帖（今日未评论过） */
-export async function checkAccountPostOnce(
-  accountId: string,
+/** 取日期键（DATE 列在 postgres.js 下通常返回 'YYYY-MM-DD' 字符串；兼容 Date） */
+function dateKeyOf(v: string | Date | null | undefined): string | null {
+  if (v === null || v === undefined) return null
+  if (typeof v === 'string') return v.slice(0, 10)
+  return v.toISOString().slice(0, 10)
+}
+
+/** 跨日重置日计数（按 UTC+8 自然日） */
+export async function ensureDailyCounter(device: DeviceRow): Promise<number> {
+  const today = localDateKey()
+  if (dateKeyOf(device.daily_done_date) === today) return device.daily_done
+  const sql = db()
+  await sql`
+    UPDATE devices SET daily_done = 0, daily_done_date = ${today}::date, updated_at = NOW()
+    WHERE id = ${device.id}
+  `
+  return 0
+}
+
+/** 第 4 条：同设备 × 同帖（今日未评论过） */
+export async function checkDevicePostOnce(
+  deviceId: string,
   postId: string,
 ): Promise<ConstraintCheck> {
-  const sql = db()
-  const rows = (await sql`
-    SELECT COUNT(*)::int AS n FROM tasks
-    WHERE account_id = ${accountId} AND post_id = ${postId}
-      AND status IN ('succeeded', 'dispatched', 'executing', 'unknown')
-      AND (dispatched_at AT TIME ZONE 'Asia/Shanghai')::date = ${localDateKey()}::date
-  `) as unknown as { n: number }[]
-  return (rows[0]?.n ?? 0) === 0
+  // unknown 是否占用名额由配置决定（默认占用 —— 避免"评论其实已发出"造成同帖重复评论）
+  const n = await countDevicePostComments(deviceId, postId, config.dispatch.unknownOccupiesPostSlot)
+  return n === 0
     ? { pass: true }
-    : { pass: false, reason: 'account_post_already_commented' }
+    : { pass: false, reason: 'device_post_already_commented' }
 }
 
 // ── 时段组（17-18）───────────────────────────────────────────

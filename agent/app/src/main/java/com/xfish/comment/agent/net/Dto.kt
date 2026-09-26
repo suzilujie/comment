@@ -152,13 +152,12 @@ data class TaskImageDto(
     val sizeBytes: Int? = null,
 )
 
-/** 任务包（§4.1） */
+/** 任务包（§4.1）—— 2026-09-26 移除 accountId：配额与节奏已下沉到设备维度 */
 @Serializable
 data class TaskPackageDto(
     val taskId: String,
     val postId: String,
     val postUrl: String,
-    val accountId: String,
     val actions: List<String>,
     /** text / image */
     val commentType: String,

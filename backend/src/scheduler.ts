@@ -43,7 +43,7 @@ export async function scanOverdueTasks(): Promise<number> {
 export async function scanOfflineDevices(): Promise<number> {
   const sql = db()
   const rows = (await sql`
-    SELECT d.id, d.last_seen_at, d.busy_task_id, d.account_id,
+    SELECT d.id, d.last_seen_at, d.busy_task_id,
            (SELECT COUNT(*)::int FROM tasks t
             WHERE t.device_id = d.id AND t.status IN ('dispatched','executing')) AS inflight
     FROM devices d
@@ -54,7 +54,6 @@ export async function scanOfflineDevices(): Promise<number> {
     id: string
     last_seen_at: Date | null
     busy_task_id: string | null
-    account_id: string | null
     inflight: number
   }[]
 

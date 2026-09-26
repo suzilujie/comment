@@ -6,6 +6,8 @@
  *  2. 不确定一律 unknown（禁止把"可能已发出"记成 failed）；
  *  3. 配额退还：failed / aborted（确认未发出）退还；unknown 暂不退还；
  *  4. 每次迁移写 task_events 留痕。
+ *
+ * 2026-09-26：归属主体由「账号」改为「设备」——配额、节奏、统计一律按 device_id。
  */
 import { db } from '../db_pg.js'
 import { emit, EVENTS } from '../bus.js'
@@ -18,10 +20,10 @@ import type { Actor, TaskStatus } from '../types.js'
 const log = createLogger('task')
 
 /**
- * 账号类失败原因（反映账号健康度，需累计 fail_streak）。
+ * 账号类失败原因（反映投放账号健康度，需累计 fail_streak）。
  *
  * 其余原因（未唤起抖音 / 元素未命中 / 网络异常 / 属地不符 / 幂等跳过等）
- * 属**环境或适配问题**，不应惩罚账号——否则调试与定位器适配期会被
+ * 属**环境或适配问题**，不应惩罚投放主体——否则调试与定位器适配期会被
  * 「连续失败 3 次自动降额」快速封停。
  */
 const ACCOUNT_FAULT_REASONS = new Set(['rate_limited', 'captcha', 'risk_dialog'])
@@ -32,7 +34,6 @@ function isAccountFault(reasonCode?: string): boolean {
 
 export interface TaskRow {
   id: string
-  account_id: string
   device_id: string | null
   post_id: string
   status: TaskStatus
@@ -51,7 +52,6 @@ export interface TaskRow {
 }
 
 interface CreateTaskInput {
-  accountId: string
   deviceId: string
   postId: string
   scriptId: string
@@ -69,10 +69,10 @@ export async function createTask(input: CreateTaskInput): Promise<TaskRow> {
   const deadline = addMinutes(nowMs(), config.dispatch.receiptTimeoutMinutes)
 
   await sql`
-    INSERT INTO tasks (id, account_id, device_id, post_id, status, script_text, script_id,
+    INSERT INTO tasks (id, device_id, post_id, status, script_text, script_id,
                        comment_type, image_hash, image_path, dispatch_ip_city,
                        dispatched_at, deadline_at)
-    VALUES (${id}, ${input.accountId}, ${input.deviceId}, ${input.postId}, 'dispatched',
+    VALUES (${id}, ${input.deviceId}, ${input.postId}, 'dispatched',
             ${input.scriptText}, ${input.scriptId}, ${input.commentType},
             ${input.imageHash ?? null}, ${input.imagePath ?? null}, ${input.dispatchIpCity},
             NOW(), ${deadline})
@@ -83,7 +83,7 @@ export async function createTask(input: CreateTaskInput): Promise<TaskRow> {
     commentType: input.commentType,
   })
   emit(EVENTS.TASK_DISPATCHED, { taskId: id, deviceId: input.deviceId })
-  log.info(`task created ${id} account=${input.accountId} post=${input.postId}`)
+  log.info(`task created ${id} device=${input.deviceId} post=${input.postId}`)
   return (await getTask(id)) as TaskRow
 }
 
@@ -153,47 +153,52 @@ export async function finishTask(
   `
   await appendEvent(taskId, status, actor, opts.reasonCode, opts.detail)
 
-  // ── 账号侧记账 ──
+  // ── 设备侧记账（2026-09-26 起由账号维度改为设备维度）──
   const finishedAt = nowMs()
+  if (task.device_id) {
+    if (status === 'succeeded') {
+      await sql`
+        UPDATE devices SET
+          total_success = total_success + 1,
+          fail_streak = 0,
+          next_eligible_at = ${new Date(finishedAt + randomInt(
+            config.dispatch.intervalMinMinutes,
+            config.dispatch.intervalMaxMinutes,
+          ) * 60_000)},
+          updated_at = NOW()
+        WHERE id = ${task.device_id}
+      `
+    } else if (status === 'failed' || status === 'aborted') {
+      // 确认未发出 → 退还当日配额。
+      // ⚠ fail_streak 仅统计「账号类失败」：设备/适配类失败（未唤起抖音、元素未命中、
+      // 网络异常、属地不符等）不反映投放账号健康度，若一并累计，调试/适配期会被
+      // 第 5 条约束「连续失败 3 次自动降额」快速封停。
+      const accountFault = isAccountFault(opts.reasonCode)
+      await sql`
+        UPDATE devices SET
+          daily_done = GREATEST(daily_done - 1, 0),
+          fail_streak = CASE WHEN ${accountFault} THEN fail_streak + 1 ELSE fail_streak END,
+          total_fail = total_fail + 1,
+          updated_at = NOW()
+        WHERE id = ${task.device_id}
+      `
+      log.info(
+        `task fail ${taskId} reason=${opts.reasonCode ?? '-'} accountFault=${accountFault}`,
+      )
+    } else {
+      await sql`
+        UPDATE devices SET total_unknown = total_unknown + 1, updated_at = NOW()
+        WHERE id = ${task.device_id}
+      `
+    }
+  }
+
   if (status === 'succeeded') {
-    await sql`
-      UPDATE accounts SET
-        total_success = total_success + 1,
-        fail_streak = 0,
-        next_eligible_at = ${new Date(finishedAt + randomInt(
-          config.dispatch.intervalMinMinutes,
-          config.dispatch.intervalMaxMinutes,
-        ) * 60_000)},
-        updated_at = NOW()
-      WHERE id = ${task.account_id}
-    `
     await sql`
       UPDATE posts SET
         last_comment_at = NOW(),
         updated_at = NOW()
       WHERE id = ${task.post_id}
-    `
-  } else if (status === 'failed' || status === 'aborted') {
-    // 确认未发出 → 退还当日配额。
-    // ⚠ fail_streak 仅统计「账号类失败」：设备/适配类失败（未唤起抖音、元素未命中、
-    // 网络异常、属地不符等）不反映账号健康度，若一并累计，调试/适配期会被
-    // 第 5 条约束「连续失败 3 次自动降额」快速封停。
-    const accountFault = isAccountFault(opts.reasonCode)
-    await sql`
-      UPDATE accounts SET
-        daily_done = GREATEST(daily_done - 1, 0),
-        fail_streak = CASE WHEN ${accountFault} THEN fail_streak + 1 ELSE fail_streak END,
-        total_fail = total_fail + 1,
-        updated_at = NOW()
-      WHERE id = ${task.account_id}
-    `
-    log.info(
-      `task fail ${taskId} reason=${opts.reasonCode ?? '-'} accountFault=${accountFault}`,
-    )
-  } else {
-    await sql`
-      UPDATE accounts SET total_unknown = total_unknown + 1, updated_at = NOW()
-      WHERE id = ${task.account_id}
     `
   }
 
@@ -209,39 +214,51 @@ export async function finishTask(
   return getTask(taskId)
 }
 
-/** 账号在途任务（一个账号同时只允许 1 条） */
-export async function findInFlightByAccount(accountId: string): Promise<TaskRow | null> {
+/** 设备在途任务（一台设备同时只允许 1 条） */
+export async function findInFlightByDevice(deviceId: string): Promise<TaskRow | null> {
   const sql = db()
   const rows = (await sql`
     SELECT * FROM tasks
-    WHERE account_id = ${accountId} AND status IN ('dispatched', 'executing')
+    WHERE device_id = ${deviceId} AND status IN ('dispatched', 'executing')
     ORDER BY dispatched_at DESC LIMIT 1
   `) as unknown as TaskRow[]
   return rows[0] ?? null
 }
 
-/** 该账号今日已完成的条数（按 UTC+8 自然日判定） */
-export async function countTodayDone(accountId: string): Promise<number> {
+/** 该设备今日已完成的条数（按 UTC+8 自然日判定） */
+export async function countTodayDone(deviceId: string): Promise<number> {
   const sql = db()
   const rows = (await sql`
     SELECT COUNT(*)::int AS n FROM tasks
-    WHERE account_id = ${accountId}
+    WHERE device_id = ${deviceId}
       AND status = 'succeeded'
       AND (finished_at AT TIME ZONE 'Asia/Shanghai')::date = ${localDateKey()}::date
   `) as unknown as { n: number }[]
   return rows[0]?.n ?? 0
 }
 
-/** 该账号是否已评论过该帖（1 次/天。放宽为跨天去重之外的历史去重） */
-export async function countAccountPostComments(
-  accountId: string,
+/**
+ * 该设备今日是否已评论过该帖（1 次/天）。
+ *
+ * 口径：
+ *  · succeeded / dispatched / executing —— 恒占用（已成功或在途，占用才能防重复派单）；
+ *  · unknown —— 由 includeUnknown 决定（调用方传 config.dispatch.unknownOccupiesPostSlot，默认 true）：
+ *    设备上报 unknown 表示"可能已发出"，占用可避免同帖出现两条评论；
+ *    若确认不会重复评论，可置 false 以不占名额（配合人工订正流程）。
+ */
+export async function countDevicePostComments(
+  deviceId: string,
   postId: string,
+  includeUnknown: boolean,
 ): Promise<number> {
   const sql = db()
   const rows = (await sql`
     SELECT COUNT(*)::int AS n FROM tasks
-    WHERE account_id = ${accountId} AND post_id = ${postId}
-      AND status IN ('succeeded', 'dispatched', 'executing', 'unknown')
+    WHERE device_id = ${deviceId} AND post_id = ${postId}
+      AND (
+        status IN ('succeeded', 'dispatched', 'executing')
+        OR (${includeUnknown} AND status = 'unknown')
+      )
       AND (dispatched_at AT TIME ZONE 'Asia/Shanghai')::date = ${localDateKey()}::date
   `) as unknown as { n: number }[]
   return rows[0]?.n ?? 0

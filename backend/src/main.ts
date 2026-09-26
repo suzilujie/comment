@@ -18,6 +18,7 @@ import { startScheduler, stopScheduler } from './scheduler.js'
 import { listDevices } from './device/device_store.js'
 import { listTasks } from './task/task_store.js'
 import { listCityPool } from './post/post_store.js'
+import adminRoute from './admin/admin_routes.js'
 import heartbeatRoute from './agent_api/heartbeat_api.js'
 import claimRoute from './agent_api/claim_api.js'
 import eventRoute from './agent_api/event_api.js'
@@ -56,7 +57,10 @@ app.get('/health', async (c) => {
   )
 })
 
-// ── 看板数据（前端待确认后开发，这里先给 JSON）──────────────
+// ── 管理台 API（独立前端 comment/admin-web 调用；见 admin/admin_routes.ts）──
+app.route('/api/admin', adminRoute)
+
+// ── 看板数据（旧接口，保留兼容；新前端统一用 /api/admin/*）──────
 app.get('/api/devices', async (c) => {
   const items = await listDevices()
   const now = Date.now()

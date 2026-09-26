@@ -1,36 +1,71 @@
 @echo off
-chcp 65001 >nul
+rem ============================================================
+rem  comment agent - grant device permissions (run after install)
+rem
+rem  Grants the three permissions that an app cannot grant itself:
+rem    1. accessibility service   (read/write screen nodes)
+rem    2. display over other apps (SYSTEM_ALERT_WINDOW)
+rem    3. MIUI background popup   (appop 10021, MIUI only)
+rem
+rem  Usage:
+rem    grant.bat          interactive (pauses before closing)
+rem    grant.bat /auto    non-interactive (called by install.bat)
+rem
+rem  Note: the app itself can never grant these silently - Android
+rem  requires an explicit user action (or adb, as done here).
+rem ============================================================
 setlocal
-set PKG=com.xfish.comment.agent.debug
-set ADB=adb
+chcp 65001 >nul
+set "PKG=com.xfish.comment.agent.debug"
+set "A11Y_SVC=%PKG%/com.xfish.comment.agent.accessibility.AutoService"
+set "ADB=adb"
 
-rem ── 定位 adb（PATH 里没有就用 Android SDK 默认路径）──
-where %ADB% >nul 2>nul
-if errorlevel 1 set ADB=%LOCALAPPDATA%\Android\Sdk\platform-tools\adb.exe
-if not exist "%ADB%" (
-  echo [x] adb 未找到，请把 Android SDK platform-tools 加入 PATH。
-  pause
-  exit /b 1
-)
+rem -- locate adb: PATH first, then the Android SDK default path --
+rem    (do NOT test with "if exist": when ADB is the bare command "adb"
+rem     it is not a file path, so that test would always fail)
+where adb >nul 2>nul
+if not errorlevel 1 goto :adb_ready
+set "ADB=%LOCALAPPDATA%\Android\Sdk\platform-tools\adb.exe"
+
+:adb_ready
+rem -- verify adb really works before using it --
+"%ADB%" version >nul 2>nul
+if errorlevel 1 goto :no_adb
 
 echo ============================================
-echo  评论 Agent - 一键授权（重装 APK 后执行）
+echo  comment agent - grant permissions
+echo  package: %PKG%
 echo ============================================
 echo.
 
-echo [1/3] 显示在其他应用上层（后台启动 Activity 的前提）
+echo [1/4] accessibility service ...
+"%ADB%" shell settings put secure enabled_accessibility_services %A11Y_SVC%
+"%ADB%" shell settings put secure accessibility_enabled 1
+
+echo [2/4] display over other apps ...
 "%ADB%" shell appops set %PKG% SYSTEM_ALERT_WINDOW allow
 
-echo [2/3] MIUI 后台弹出界面（仅 MIUI 需要；其他 ROM 报错可忽略）
+echo [3/4] MIUI background popup (ignored on other ROMs) ...
 "%ADB%" shell cmd appops set %PKG% 10021 allow
 
-echo [3/3] 校验结果：
+echo [4/4] verify ...
+"%ADB%" shell settings get secure enabled_accessibility_services
 "%ADB%" shell appops get %PKG% SYSTEM_ALERT_WINDOW
 "%ADB%" shell appops get %PKG% 10021
 
 echo.
-echo 以上两项都应为 allow。若仍不是，请手动到：
-echo   设置 -^> 应用管理 -^> 评论 Agent -^> 权限管理
-echo   开启「显示在其他应用上层」与「后台弹出界面」。
+echo Expected: the AutoService is listed and both appops are "allow".
+echo If not, enable them manually:
+echo   Settings - Apps - comment Agent - Permissions
 echo.
+
+rem -- keep the window open unless called with /auto --
+if /i "%~1"=="/auto" goto :eof
 pause
+goto :eof
+
+:no_adb
+echo [x] adb not found. Add Android SDK platform-tools to PATH.
+if /i "%~1"=="/auto" goto :eof
+pause
+goto :eof

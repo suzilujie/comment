@@ -131,7 +131,13 @@ object SelfCheck {
         //    控件点击可能对抖音自定义控件无效（返回 true 但面板未开），故加一次手势点击重试；
         //    并以「输入框入口是否出现」作为面板打开的标志，而非固定延时。
         var panelInput: AccessibilityNodeInfo? = null
-        if ("评论区入口" !in missing) {
+        // 面板可能已处于展开状态（用户手动打开过 / 抖音默认展示评论区）。
+        // 此时不能再去点「入口」——展开态下 commentEntry 的宽泛候选会命中
+        // desc="缩小评论区" 的关闭按钮，把面板关掉（抖音 39.7.0 实测）。
+        panelInput = NodeFinder.find(DouyinLocators.commentInputEntry)
+        if (panelInput != null) {
+            Log.i(TAG, "评论面板已处于展开状态，跳过打开动作")
+        } else if ("评论区入口" !in missing) {
             for (attempt in 0..1) {
                 val entry = NodeFinder.find(DouyinLocators.commentEntry) ?: break
                 Actions.click(entry, preferGesture = attempt == 1)

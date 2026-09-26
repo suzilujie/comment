@@ -156,8 +156,11 @@ object ClashClient {
             Log.w(TAG, "group not found: $slug（provider 可能尚未刷新）")
             return@withContext false
         }
-        if (info.type != "select") {
-            Log.e(TAG, "group $slug 类型为 ${info.type}，必须为 select —— 拒绝切换（否则 IP 会漂移）")
+        // 类型校验：Clash Meta 返回 "Select"，sing-box 兼容层返回 "Selector"。
+        // 两者语义一致（手动选择组，不会像 url-test/fallback 那样自动换节点），故忽略大小写并同时接受；
+        // 其余类型（url-test / fallback / load-balance）仍一律拒绝，避免切完被核心自动改回去导致属地漂移。
+        if (info.type.lowercase() !in setOf("select", "selector")) {
+            Log.e(TAG, "group $slug 类型为 ${info.type}，必须为 select/selector —— 拒绝切换（否则 IP 会漂移）")
             return@withContext false
         }
         if (info.all.isNotEmpty() && nodeName !in info.all) {

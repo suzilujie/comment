@@ -5,16 +5,18 @@
  *  - **不预先排程**：任务在派发那一刻创建，拿到即执行，没有 plannedAt；
  *  - **设备只猜时机，后台做裁决**：设备调用领取接口，后台按 20 条约束求解；
  *  - 未派单时返回原因码与建议重试秒数（设备按此退避，避免高频空问）。
+ *
+ * 2026-09-26：账号实体移除，配额与节奏下沉到设备维度（一机一号，语义等价）。
  */
 import { config } from '../config.js'
 import { createLogger } from '../logger.js'
-import { addMinutes, nowMs } from '../datetime.js'
+import { addMinutes, nowMs, parseMs } from '../datetime.js'
 import { randomInt } from '../random.js'
 import { db } from '../db_pg.js'
 import { getDevice } from '../device/device_store.js'
 import {
   createTask,
-  findInFlightByAccount,
+  findInFlightByDevice,
   countTodayDone,
   getTask,
 } from '../task/task_store.js'
@@ -30,15 +32,14 @@ import type { DispatchResult } from '../types.js'
 import { NO_DISPATCH_REASONS } from '../types.js'
 import type { TaskPackage } from '../contracts/platform.js'
 import {
-  checkAccount,
-  checkAccountPostOnce,
   checkDevice,
+  checkDevicePostOnce,
   checkGlobalDensity,
   checkMaterialAvailable,
   checkPostPacing,
   checkPostQuota,
+  checkQuota,
   checkTimeWindow,
-  getAccount,
   recordDispatch,
 } from './constraints.js'
 
@@ -64,34 +65,24 @@ export async function dispatchTo(deviceId: string): Promise<DispatchOutcome> {
     return { task: null, reason: devCheck.reason, retryAfterSeconds: 60 }
   }
 
-  if (!device.account_id) {
-    log.info(`dispatch reject device=${deviceId} stage=account_bind reason=account_id_empty`)
-    return { task: null, reason: NO_DISPATCH_REASONS.ACCOUNT_NOT_ELIGIBLE, retryAfterSeconds: 600 }
-  }
-
-  // ── 第 1、2、3、5、6 条：账号侧 ──
-  const account = await getAccount(device.account_id)
-  if (!account) {
+  // ── 配额与节奏（原账号组 1/2/3/5，现设备维度）──
+  const quotaCheck = await checkQuota(device)
+  if (!quotaCheck.pass) {
     log.info(
-      `dispatch reject device=${deviceId} account=${device.account_id} stage=account reason=account_not_found`,
-    )
-    return { task: null, reason: NO_DISPATCH_REASONS.ACCOUNT_NOT_ELIGIBLE, retryAfterSeconds: 600 }
-  }
-  const accCheck = await checkAccount(account)
-  if (!accCheck.pass) {
-    log.info(
-      `dispatch reject device=${deviceId} account=${account.id} stage=account ` +
-        `reason=${accCheck.reason} retry=${accCheck.retryAfterSeconds ?? 300}s`,
+      `dispatch reject device=${deviceId} stage=quota reason=${quotaCheck.reason} ` +
+        `retry=${quotaCheck.retryAfterSeconds ?? 300}s`,
     )
     return {
       task: null,
-      reason: accCheck.reason,
-      retryAfterSeconds: accCheck.retryAfterSeconds ?? 300,
+      reason: quotaCheck.reason,
+      retryAfterSeconds: quotaCheck.retryAfterSeconds ?? 300,
     }
   }
-  const inflight = await findInFlightByAccount(account.id)
+
+  // 第 6 条：在途唯一（一台设备同时只允许 1 条）
+  const inflight = await findInFlightByDevice(device.id)
   if (inflight) {
-    log.info(`dispatch reject device=${deviceId} account=${account.id} stage=account_inflight reason=busy`)
+    log.info(`dispatch reject device=${deviceId} stage=inflight reason=busy`)
     return { task: null, reason: NO_DISPATCH_REASONS.DEVICE_BUSY, retryAfterSeconds: 60 }
   }
 
@@ -126,8 +117,8 @@ export async function dispatchTo(deviceId: string): Promise<DispatchOutcome> {
   for (const post of candidates) {
     const skip = (why: string) => log.info(`dispatch skip device=${deviceId} post=${post.id} reason=${why}`)
 
-    const once = await checkAccountPostOnce(account.id, post.id)
-    if (!once.pass) { skip(`account_post_once:${once.reason}`); continue }
+    const once = await checkDevicePostOnce(device.id, post.id)
+    if (!once.pass) { skip(`device_post_once:${once.reason}`); continue }
 
     const quota = await checkPostQuota(post.id)
     if (!quota.pass) { skip(`post_quota:${quota.reason}`); continue }
@@ -147,7 +138,6 @@ export async function dispatchTo(deviceId: string): Promise<DispatchOutcome> {
 
     // ── 派发：创建任务 + 扣配额 + 记录素材占用 + 记录密度 ──
     const task = await createTask({
-      accountId: account.id,
       deviceId: device.id,
       postId: post.id,
       scriptId: script.id,
@@ -161,14 +151,14 @@ export async function dispatchTo(deviceId: string): Promise<DispatchOutcome> {
     // 扣减当日配额（在派单时扣，避免并发超额）
     const sql = db()
     await sql`
-      UPDATE accounts SET daily_done = daily_done + 1, updated_at = NOW()
-      WHERE id = ${account.id}
+      UPDATE devices SET daily_done = daily_done + 1, updated_at = NOW()
+      WHERE id = ${device.id}
     `
     await markMaterialUsed(post.id, [`script:${script.id}`, ...(image ? [`image:${image.hash}`] : [])], task.id)
     await recordDispatch(device.id, city)
 
     const pkg = await toTaskPackage(task.id)
-    const done = await countTodayDone(account.id)
+    const done = await countTodayDone(device.id)
     log.info(
       `dispatched task=${task.id} device=${device.id} post=${post.id} city=${city} ` +
         `type=${commentType} today=${done}/${config.dispatch.dailyQuotaPerAccount}`,
@@ -183,7 +173,7 @@ export async function dispatchTo(deviceId: string): Promise<DispatchOutcome> {
   return { task: null, reason: NO_DISPATCH_REASONS.NO_POST_AVAILABLE, retryAfterSeconds: 300 }
 }
 
-/** 组装任务包（设备端契约，见 §4.1） */
+/** 组装任务包（设备端契约，见 §4.1；2026-09-26 起不含 accountId） */
 export async function toTaskPackage(taskId: string): Promise<TaskPackage | null> {
   const task = await getTask(taskId)
   if (!task) return null
@@ -202,7 +192,6 @@ export async function toTaskPackage(taskId: string): Promise<TaskPackage | null>
     taskId: task.id,
     postId: post.id,
     postUrl: post.url,
-    accountId: task.account_id,
     actions,
     commentType: task.comment_type ?? 'text',
     scriptText: task.script_text ?? '',
@@ -216,21 +205,21 @@ export async function toTaskPackage(taskId: string): Promise<TaskPackage | null>
   }
 }
 
-/** 账号当前是否"可以接单"（仅用于心跳里的提示，不做最终裁决） */
-export async function eligibleForTask(accountId: string | null): Promise<boolean> {
-  if (!accountId) return false
-  const account = await getAccount(accountId)
-  if (!account || account.status !== 'active' || account.fail_streak >= 3) return false
-  const next = account.next_eligible_at ? new Date(account.next_eligible_at).getTime() : null
+/** 该设备当前是否"可以接单"（仅用于心跳里的提示，不做最终裁决） */
+export async function eligibleForTask(deviceId: string | null): Promise<boolean> {
+  if (!deviceId) return false
+  const d = await getDevice(deviceId)
+  if (!d || d.admin_state !== 'enabled' || d.fail_streak >= 3) return false
+  const next = parseMs(d.next_eligible_at)
   if (next !== null && nowMs() < next) return false
-  const done = await countTodayDone(accountId)
+  const done = await countTodayDone(deviceId)
   return done < config.dispatch.dailyQuotaPerAccount
 }
 
-/** 计算该账号的下次可派单时间（供看板与诊断） */
-export async function nextEligibleAt(accountId: string): Promise<Date | null> {
-  const account = await getAccount(accountId)
-  const next = account?.next_eligible_at ? new Date(account.next_eligible_at) : null
+/** 计算该设备的下次可派单时间（供看板与诊断） */
+export async function nextEligibleAt(deviceId: string): Promise<Date | null> {
+  const d = await getDevice(deviceId)
+  const next = d?.next_eligible_at ? new Date(d.next_eligible_at) : null
   if (next) return next
   return addMinutes(nowMs(), randomInt(config.dispatch.intervalMinMinutes, config.dispatch.intervalMaxMinutes))
 }

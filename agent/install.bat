@@ -14,18 +14,22 @@ echo.
 
 if not exist "%APK%" goto :no_apk
 
-echo [1/3] checking device ...
+echo [1/4] checking device ...
 "%ADB%" get-state >nul 2>nul
 if errorlevel 1 goto :no_device
 "%ADB%" devices
 
 echo.
-echo [2/3] installing apk ...
+echo [2/4] installing apk ...
 "%ADB%" install -r "%APK%"
 if errorlevel 1 goto :fail
 
 echo.
-echo [3/3] done. Open "评论 Agent" on the device.
+echo [3/4] granting permissions (accessibility / overlay / MIUI popup) ...
+call "%~dp0grant.bat" /auto
+
+echo.
+echo [4/4] done. Open "评论 Agent" on the device.
 goto :eof
 
 :no_apk

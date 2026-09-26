@@ -87,13 +87,15 @@ object CityRotator {
 
         // 步骤 3：从城市池随机选城（排除当前）
         val pool = loadCityPool(context)
-        if (pool.size < 2) {
-            Log.w(TAG, "城市池不足（${pool.size} 个），跳过切城")
+        if (pool.isEmpty()) {
+            Log.w(TAG, "城市池为空，跳过切城")
             return@withContext null
         }
         val currentSlug = Prefs.currentCitySlug(context)
-        // 先按 slug 排除当前城市，再随机取（pool 是 CityPoolItemDto 列表，不能直接与 String 做排除）
-        val candidates = pool.filterNot { it.slug == currentSlug }
+        // 先按 slug 排除当前城市，再随机取（pool 是 CityPoolItemDto 列表，不能直接与 String 做排除）；
+        // 若池内只剩一个组（城市池收敛为单一 selector 组时会出现），排除后会为空，此时回退用全池 ——
+        // 跨城随机性由组内节点随机选择保证（pickNode → Rnd.pick(all)）。
+        val candidates = pool.filterNot { it.slug == currentSlug }.ifEmpty { pool }
         val target = Rnd.pick(candidates) ?: run {
             Log.w(TAG, "无法选出目标城市")
             return@withContext null

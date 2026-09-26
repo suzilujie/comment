@@ -28,6 +28,13 @@ function float(key: string, fallback: number): number {
   return Number.isFinite(n) ? n : fallback
 }
 
+/** 读布尔（'1'/'true'/'yes'/'on' 视为真） */
+function bool(key: string, fallback: boolean): boolean {
+  const v = process.env[key]
+  if (v === undefined || v === '') return fallback
+  return ['1', 'true', 'yes', 'on'].includes(v.trim().toLowerCase())
+}
+
 /** "08:30" → 510（当天第几分钟） */
 function timeToMinute(v: string): number {
   const m = /^(\d{1,2}):(\d{2})$/.exec(v.trim())
@@ -53,6 +60,12 @@ export interface DispatchConfig {
   perPostMinIntervalMinutes: number
   /** 回执截止：派发后多少分钟无回执 → unknown */
   receiptTimeoutMinutes: number
+  /**
+   * unknown 是否占用「同设备 × 同帖每天一次」名额。
+   *  true （默认，保守）：unknown 意味着"可能已发出"，占用可避免同帖出现两条评论；
+   *  false（激进）：unknown 不占名额，适合假失败已被消除、且确定不会重复评论的场景。
+   */
+  unknownOccupiesPostSlot: boolean
 }
 
 export interface HeartbeatConfig {
@@ -89,6 +102,7 @@ export const config = {
     globalWindowSeconds: int('GLOBAL_DISPATCH_WINDOW_SECONDS', 300),
     perPostMinIntervalMinutes: int('PER_POST_MIN_INTERVAL_MINUTES', 15),
     receiptTimeoutMinutes: int('RECEIPT_TIMEOUT_MINUTES', 15),
+    unknownOccupiesPostSlot: bool('UNKNOWN_OCCUPIES_POST_SLOT', true),
   } satisfies DispatchConfig,
   heartbeat: {
     seconds: int('HEARTBEAT_SECONDS', 30),

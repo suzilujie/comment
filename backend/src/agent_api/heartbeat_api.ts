@@ -34,11 +34,11 @@ route.post('/', async (c) => {
   const pool = await listCityPool()
   const poolVersion = pool.map((p) => p.slug).sort().join(',')
 
-  // 人格档案按账号进度下发（P3 会真正用到 profile 内容）
-  const personality = await loadPersonality(row.account_id)
+  // 人格档案按设备下发（P3 会真正用到 profile 内容）
+  const personality = await loadPersonality(row.id)
 
   // 是否有派单资格（仅提示；最终由 claim 裁决）
-  const eligible = await eligibleForTask(row.account_id)
+  const eligible = await eligibleForTask(row.id)
 
   const resp = buildHeartbeatResponse({
     serverTimeMs: nowMs(),
@@ -64,10 +64,10 @@ route.post('/', async (c) => {
 
 /** 载入人格档案（表可能为空；P3 之前返回 undefined） */
 async function loadPersonality(
-  accountId: string | null,
+  deviceId: string | null,
 ): Promise<{ version: number; profile: Record<string, unknown> } | undefined> {
-  if (!accountId) return undefined
-  const p = await getPersonality(accountId)
+  if (!deviceId) return undefined
+  const p = await getPersonality(deviceId)
   return p ? { version: p.version, profile: p.profile } : undefined
 }
 

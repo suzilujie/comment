@@ -1,9 +1,12 @@
 -- ════════════════════════════════════════════════════════════════
--- 联调专用：批量造数据 + 修复设备绑定（幂等，可重复执行）
+-- 联调专用：批量造数据 + 复位设备配额（幂等，可重复执行）
 --
 -- 用途：让「手动领取」能连续多次成功。原始 seed.sql 只有
---       2 个帖子 / 3 条话术，且同账号同帖每天只能评一次，
+--       2 个帖子 / 3 条话术，且同设备同帖每天只能评一次，
 --       几轮就枯竭；本脚本把帖子扩到 20 个、话术扩到 30 条。
+--
+-- 2026-09-26：账号实体已移除 —— 原先的「绑定账号」「重置账号间隔」
+--             两段改为「复位最新活跃设备」。
 --
 -- 用法：
 --   docker cp sql/dev_seed.sql xhs_pg:/tmp/dev_seed.sql
@@ -77,11 +80,13 @@ UPDATE posts SET
   updated_at = NOW()
 WHERE status = 'active';
 
--- ④ 绑定「最新活跃设备」到测试账号（一机一账号：先解绑旧的）
-UPDATE devices SET account_id = NULL, updated_at = NOW()
-WHERE account_id = 'acc_test_001';
-
-UPDATE devices SET account_id = 'acc_test_001', updated_at = NOW()
+-- ④ 复位「最新活跃设备」的配额与节奏（便于立即领取）
+UPDATE devices SET
+  daily_done = 0,
+  daily_done_date = NULL,
+  next_eligible_at = NULL,
+  fail_streak = 0,
+  updated_at = NOW()
 WHERE id = (
   SELECT id FROM devices
   WHERE id <> 'smoke-device-0001'
@@ -89,40 +94,31 @@ WHERE id = (
   LIMIT 1
 );
 
--- ⑤ 城市池同步（保证后台下发给设备的城市池包含当前有帖的城市）
+-- ⑤ 城市池同步（保证后台下发给设备的城/组包含当前有帖的条目）
 INSERT INTO city_pools (city, slug, active)
 SELECT DISTINCT
   p.city,
-  'city-' || lower(replace(p.city, ' ', '-')),
+  'city-pool',
   TRUE
 FROM posts p
 WHERE p.status = 'active'
-ON CONFLICT (city) DO NOTHING;
+ON CONFLICT (city) DO UPDATE SET active = TRUE, updated_at = NOW();
 
--- ⑥ 重置账号间隔与失败计数（便于立即领取）
-UPDATE accounts SET
-  next_eligible_at = NULL,
-  fail_streak = 0,
-  status = 'active',
-  updated_at = NOW()
-WHERE id = 'acc_test_001';
-
--- ⑦ 结果速览
+-- ⑥ 结果速览
 SELECT 'scripts' AS t, count(*) AS n FROM scripts
 UNION ALL SELECT 'posts(active)', count(*) FROM posts WHERE status = 'active'
-UNION ALL SELECT 'accounts', count(*) FROM accounts
-UNION ALL SELECT 'devices(bound)', count(*) FROM devices WHERE account_id IS NOT NULL;
+UNION ALL SELECT 'devices', count(*) FROM devices;
 
-SELECT id, account_id, last_ip_city, last_seen_at FROM devices
-WHERE account_id IS NOT NULL ORDER BY last_seen_at DESC NULLS LAST;
+SELECT id, daily_done, next_eligible_at, fail_streak, last_ip_city, last_seen_at
+FROM devices ORDER BY last_seen_at DESC NULLS LAST LIMIT 3;
 
 -- ════════════════════════════════════════════════════════════════
--- ⑧【需要反复联调时手工执行】清空历史，恢复全部配额
+-- ⑦【需要反复联调时手工执行】清空历史，恢复全部配额
 --    取消下面注释后执行，可立刻再跑一轮：
 -- DELETE FROM tasks;
 -- DELETE FROM post_material_usage;
 -- DELETE FROM dispatch_tokens;
--- UPDATE accounts SET daily_done = 0, daily_done_date = NULL,
+-- UPDATE devices SET daily_done = 0, daily_done_date = NULL,
 --        next_eligible_at = NULL, fail_streak = 0;
 -- UPDATE posts SET last_comment_at = NULL;
 -- ════════════════════════════════════════════════════════════════

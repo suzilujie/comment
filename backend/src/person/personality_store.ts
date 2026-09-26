@@ -1,9 +1,11 @@
 /**
  * 人格档案存储与生成（设计文档 §6.5）。
  *
- * 两层随机中的「人格层」：一账号一份、长期稳定。
+ * 两层随机中的「人格层」：一设备一份、长期稳定。
  * 生成用**分层抽样**（低/中/高三档按 25/50/25 分配），避免各维度取值扎堆。
  * 注意：人格不得越过硬约束（日上限、完成间隔、投放时段优先于人格偏好）。
+ *
+ * 2026-09-26：随账号实体移除，主键由 account_id 改为 device_id。
  */
 import { db } from '../db_pg.js'
 import { createLogger } from '../logger.js'
@@ -12,7 +14,7 @@ import { randomBool, randomFloat, randomInt } from '../random.js'
 const log = createLogger('personality')
 
 export interface PersonalityRow {
-  account_id: string
+  device_id: string
   profile: Record<string, unknown>
   bands: Record<string, string> | null
   version: number
@@ -60,28 +62,28 @@ export function generateProfile(): { profile: Record<string, unknown>; bands: Re
   return { profile, bands }
 }
 
-export async function getPersonality(accountId: string): Promise<PersonalityRow | null> {
+export async function getPersonality(deviceId: string): Promise<PersonalityRow | null> {
   const sql = db()
   const rows = (await sql`
-    SELECT account_id, profile, bands, version FROM personalities WHERE account_id = ${accountId} LIMIT 1
+    SELECT device_id, profile, bands, version FROM personalities WHERE device_id = ${deviceId} LIMIT 1
   `) as unknown as PersonalityRow[]
   return rows[0] ?? null
 }
 
 /** 幂等生成：已存在则返回既有档案 */
-export async function ensurePersonality(accountId: string): Promise<PersonalityRow> {
-  const existing = await getPersonality(accountId)
+export async function ensurePersonality(deviceId: string): Promise<PersonalityRow> {
+  const existing = await getPersonality(deviceId)
   if (existing) return existing
 
   const { profile, bands } = generateProfile()
   const sql = db()
   await sql`
-    INSERT INTO personalities (account_id, profile, bands, version)
-    VALUES (${accountId}, ${JSON.stringify(profile)}::jsonb, ${JSON.stringify(bands)}::jsonb, 1)
-    ON CONFLICT (account_id) DO NOTHING
+    INSERT INTO personalities (device_id, profile, bands, version)
+    VALUES (${deviceId}, ${JSON.stringify(profile)}::jsonb, ${JSON.stringify(bands)}::jsonb, 1)
+    ON CONFLICT (device_id) DO NOTHING
   `
-  log.info(`personality generated for ${accountId}: ${JSON.stringify(bands)}`)
-  const row = await getPersonality(accountId)
+  log.info(`personality generated for ${deviceId}: ${JSON.stringify(bands)}`)
+  const row = await getPersonality(deviceId)
   if (!row) throw new Error('personality insert failed')
   return row
 }

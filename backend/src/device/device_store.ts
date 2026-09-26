@@ -15,7 +15,6 @@ const log = createLogger('device')
 /** devices 表行（只列出代码用到的列） */
 export interface DeviceRow {
   id: string
-  account_id: string | null
   admin_state: AdminState
   last_seen_at: Date | null
   last_ip: string | null
@@ -30,6 +29,14 @@ export interface DeviceRow {
   clock_offset_sec: number | null
   model: string | null
   resolution: string | null
+  // ── 配额与计数（2026-09-26 由 accounts 表迁入设备维度）──
+  daily_done: number
+  daily_done_date: string | Date | null
+  next_eligible_at: Date | null
+  fail_streak: number
+  total_success: number
+  total_fail: number
+  total_unknown: number
 }
 
 export async function getDevice(deviceId: string): Promise<DeviceRow | null> {
@@ -149,10 +156,12 @@ export async function clearBusy(deviceId: string, taskId: string): Promise<void>
 export async function listDevices(limit = 200): Promise<DeviceRow[]> {
   const sql = db()
   return (await sql`
-    SELECT id, account_id, admin_state, last_seen_at, last_ip, last_ip_city,
+    SELECT id, admin_state, last_seen_at, last_ip, last_ip_city,
            accessibility_ok, foreground_ok, proxy_ok, busy_task_id,
            agent_version, rule_pack_version, douyin_version, clock_offset_sec,
-           model, resolution
+           model, resolution,
+           daily_done, daily_done_date, next_eligible_at, fail_streak,
+           total_success, total_fail, total_unknown
     FROM devices
     ORDER BY last_seen_at DESC NULLS LAST
     LIMIT ${limit}

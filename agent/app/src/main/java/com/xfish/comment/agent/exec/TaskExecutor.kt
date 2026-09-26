@@ -32,10 +32,12 @@ import kotlinx.serialization.json.put
  *  · **确认未发出** → `failed` / `aborted`（可退还配额）；
  *  · **无法确认是否已发出** → `unknown`，**禁止自动重试**（转人工确认）。
  *
- * 提交后的判定采用「输入框是否仍留有文本」作为关键证据：
- *  · 输入框空了 + 评论列表读到 → `succeeded`
+ * 提交后的判定（实测约束：抖音的评论正文与昵称**不暴露给无障碍服务**，
+ * 所以"在列表里读到自己的评论"基本不可能命中）：
+ *  · 列表里读到本轮话术 → `succeeded`（comment_visible）
+ *  · 评论数（desc="评论N，按钮"）+1 → `succeeded`（comment_count_increased，唯一可读的正向证据）
  *  · 输入框仍有文本 → 提交未生效 → `failed`（确认未发出）
- *  · 输入框空了但列表没读到 → 可能已发出（列表未刷新 / 审核中）→ **`unknown`**
+ *  · 输入框空了但两条证据都拿不到 → 可能已发出（审核中 / 计数未刷新）→ **`unknown`**
  */
 object TaskExecutor {
 
@@ -120,7 +122,6 @@ object TaskExecutor {
                     taskId = task.taskId,
                     postId = task.postId,
                     postUrl = task.postUrl,
-                    accountId = task.accountId,
                     commentType = task.commentType,
                     scriptText = task.scriptText,
                     imagePath = task.image?.hash,
@@ -225,12 +226,19 @@ object TaskExecutor {
             }
 
             // ── 步骤 8：打开评论区 → 先读几条评论（真人不会打开就发）──
-            val entry = NodeFinder.find(DouyinLocators.commentEntry)
-            if (entry == null || !Actions.click(entry)) {
-                logPageDump("评论区入口未命中或点击失败")
-                return finish(Outcome("failed", Config.Reason.ELEMENT_MISSING, "comment_entry_click_failed", startedAt = startedAt), task, reporter)
+            // 若面板已展开（抖音部分页面默认展开评论区），不要再去点「入口」——
+            // 展开态下 commentEntry 的宽泛候选会命中 desc="缩小评论区" 的关闭按钮（39.7.0 实测）。
+            val panelAlreadyOpen = NodeFinder.find(DouyinLocators.commentInputEntry) != null
+            if (!panelAlreadyOpen) {
+                val entry = NodeFinder.find(DouyinLocators.commentEntry)
+                if (entry == null || !Actions.click(entry)) {
+                    logPageDump("评论区入口未命中或点击失败")
+                    return finish(Outcome("failed", Config.Reason.ELEMENT_MISSING, "comment_entry_click_failed", startedAt = startedAt), task, reporter)
+                }
+                delay(Rnd.long(900, 1_800))
+            } else {
+                Log.i(TAG, "评论区已处于展开状态，跳过打开动作")
             }
-            delay(Rnd.long(900, 1_800))
             riskOrNull()?.let { return finish(it.copy(startedAt = startedAt), task, reporter) }
 
             val toRead = Human.commentsToRead(context)
@@ -239,6 +247,13 @@ object TaskExecutor {
                 Actions.swipeVertical(screenCenterX(context), screenHeight(context) * 0.70, screenHeight(context) * 0.45)
                 Human.pause(900, 2_600)
             }
+
+            // ── 步骤 8.5：记录评论数基线（发送前必须取，否则无法比较）──
+            // 抖音评论正文/昵称不暴露给无障碍服务（2026-09-26 实测：整页 dump 仅 212 个节点、
+            // 无任何评论文本、无昵称），"读到自己的评论"基本不可命中；
+            // 因此把可读的「评论数」作为提交成功的第二判据（发送后 +1）。
+            val commentCountBefore = readCommentCount()
+            Log.i(TAG, "发送前评论数基线=$commentCountBefore")
 
             // ── 步骤 9：输入话术（剪贴板 + 粘贴）──
             val inputEntry = NodeFinder.waitFor(DouyinLocators.commentInputEntry, timeoutMs = 5_000)
@@ -294,18 +309,50 @@ object TaskExecutor {
             riskOrNull()?.let { return finish(it.copy(startedAt = startedAt), task, reporter) }
 
             val tVerify = Time.nowMs()
-            val visible = NodeFinder.waitForTextContains(signature, timeoutMs = 8_000)
-            // 关键证据：输入框（EditText）是否仍持有本次话术。
-            // 不能用「输入框里有任意文本」判定——抖音的其它提示文案会被误判成「未发出」，
-            // 导致明明已提交成功却记成 failed（且与步骤 10 的判定标准不一致）。
-            val inputStillHasText = inputStillHasScript(signature)
+            // 真机实测（2026-09-26 / Redmi K30 / 抖音 39.7.0）：发送成功后评论其实已发出，
+            // 校验却读不到 → 误判 not_visible_but_input_empty（unknown）。两个原因：
+            //   ① 发送后评论面板可能被收起，评论列表不在无障碍树里（dump 里只有标题与输入框）；
+            //   ② 步骤 8 浏览评论已把列表滚到中段，而新评论在最顶部 —— 不回顶就永远读不到。
+            // 因此改为「确保面板展开 → 滚回顶部 → 轮询读取」三轮，命中即止。
+            var visible = false
+            var inputStillHasText = false
+            var countAfter: Int? = null
+            for (round in 0..2) {
+                if (round > 0) {
+                    riskOrNull()?.let { return finish(it.copy(startedAt = startedAt), task, reporter) }
+                    // 面板收起时先重新展开（展开态下点 commentEntry 会命中「缩小评论区」，故先判）
+                    if (NodeFinder.find(DouyinLocators.commentInputEntry) == null) {
+                        NodeFinder.find(DouyinLocators.commentEntry)?.let { Actions.click(it) }
+                        delay(Rnd.long(800, 1_400))
+                    }
+                    // 新评论在列表最顶部：拇指自上而下滑两次，把列表拉回顶部
+                    repeat(2) {
+                        Actions.swipeVertical(
+                            screenCenterX(context),
+                            screenHeight(context) * 0.35,
+                            screenHeight(context) * 0.72,
+                        )
+                        delay(Rnd.long(500, 900))
+                    }
+                }
+                visible = NodeFinder.waitForTextContains(signature, timeoutMs = 3_000)
+                // 关键证据：输入框（EditText）是否仍持有本次话术。
+                // 不能用「输入框里有任意文本」判定——抖音的其它提示文案会被误判成「未发出」，
+                // 导致明明已提交成功却记成 failed（且与步骤 10 的判定标准不一致）。
+                inputStillHasText = inputStillHasScript(signature)
+                // 第二判据：评论数是否 +1（评论正文不可读，计数可读 → 唯一可用的正向证据）
+                countAfter = readCommentCount()
+                if (visible || inputStillHasText || commentCountGrew(commentCountBefore, countAfter)) break
+            }
 
+            val countGrew = commentCountGrew(commentCountBefore, countAfter)
             Log.i(
                 TAG,
                 "步骤11 校验：评论可见=$visible 输入框仍含话术=$inputStillHasText " +
+                    "评论数=$commentCountBefore->$countAfter " +
                     "signature=$signature 耗时=${Time.nowMs() - tVerify}ms 页面=${AutoService.currentPage()}",
             )
-            if (!visible) {
+            if (!visible && !countGrew) {
                 // failed / unknown 的关键现场：是否弹风控、是否进了审核、是否列表未刷新
                 logPageDump("未读到评论")
             }
@@ -321,7 +368,13 @@ object TaskExecutor {
                     startedAt = startedAt, finishedAt = Time.nowMs(),
                 )
 
-                // 输入框空了、但列表里没读到 → 可能已发出（列表未刷新 / 审核中 / 影子限流）
+                // 评论数 +1 → 平台已接受这条评论（正向证据；评论正文不暴露给 a11y，读不到属正常）
+                countGrew -> Outcome(
+                    "succeeded", null, "comment_count_increased:$commentCountBefore->$countAfter",
+                    startedAt = startedAt, finishedAt = Time.nowMs(),
+                )
+
+                // 输入框空了、但两条证据都拿不到 → 可能已发出（审核中 / 计数未刷新）
                 // **这是最关键的一类：必须归 unknown，禁止自动重试**
                 else -> Outcome(
                     "unknown", Config.Reason.VERIFY_FAILED, "not_visible_but_input_empty",
@@ -373,13 +426,61 @@ object TaskExecutor {
         RiskGuard.Signal.RISK_DIALOG -> Outcome("aborted", s.reasonCode, "risk_dialog_local")
     }
 
-    /** 收尾：逐级返回退出（真人用返回键，不会强杀进程） */
+    /**
+     * 收尾：模拟真人"发完评论之后"的行为，并最终离开抖音。
+     *
+     * 为什么随机化（2026-09-26 真机结论）：
+     *  · 若结束时停留在抖音，视频会持续播放且**保持屏幕常亮**（用户反馈"一直播放好久了"），
+     *    所以最终必须离开前台；
+     *  · 但"离开"这件事本身不能固定 —— 每次都精确地在发完评论 1 秒后退出，
+     *    这种规律性本身就是一个可观测的行为特征（反检测视角）。
+     * 因此把「是否再看两条 / 停留多久 / 怎么离开」全部随机化。
+     *
+     * 行为分布（可按需调整）：
+     *  · 40%  继续浏览 1~3 条视频（真人发完评论常顺手再刷几个）；
+     *  · 35%  离开前退回抖音首页停留 1.5~5 秒（"顺手看一眼"）；
+     *  · 返回次数 1~2 次随机，各步停顿随机。
+     *
+     * 全程只用 GLOBAL_ACTION_BACK / HOME，**不 force-stop 杀进程**；
+     * 若用户已手动切到别的 App，则不做任何多余动作（不打扰）。
+     */
     private suspend fun exitGracefully(context: Context) {
-        repeat(2) {
-            Actions.back()
-            delay(Rnd.long(300, 800))
+        // ① 概率性"再看两条"
+        if (Rnd.bool(0.4)) {
+            val extra = Rnd.int(1, 3)
+            Log.i(TAG, "收尾：继续浏览 $extra 条视频")
+            repeat(extra) {
+                Actions.swipeVertical(
+                    screenCenterX(context),
+                    screenHeight(context) * 0.72,
+                    screenHeight(context) * 0.30,
+                )
+                delay(Rnd.long(1_500, 6_000))
+            }
         }
-        if (Rnd.bool(0.5)) Actions.home()
+
+        // ② 退出评论面板 / 详情页（返回次数随机，模拟真人的"要退几次"）
+        repeat(Rnd.int(1, 2)) {
+            Actions.back()
+            delay(Rnd.long(300, 900))
+        }
+
+        // ③ 35%：在抖音首页停留片刻再离开
+        if (Rnd.bool(0.35)) {
+            Log.d(TAG, "收尾：在抖音首页停留片刻")
+            delay(Rnd.long(1_500, 5_000))
+        }
+
+        // ④ 离开（用户已切走则不动，避免打扰）
+        if (AutoService.douyinForeground()) {
+            Actions.home()
+            delay(Rnd.long(300, 900))
+            // 个别 ROM 会吞掉一次 HOME，兜底再按一次
+            if (AutoService.douyinForeground()) {
+                Actions.home()
+                delay(Rnd.long(400, 900))
+            }
+        }
         Log.d(TAG, "已逐级退出")
     }
 
@@ -396,6 +497,27 @@ object TaskExecutor {
         val edit = NodeFinder.find(DouyinLocators.editableField) ?: return false
         return edit.text?.toString().orEmpty().contains(signature)
     }
+
+    /**
+     * 读取当前页面的评论数（抖音按钮 desc 形如「评论7，按钮」，评论面板展开/收起态都存在）。
+     *
+     * 背景：抖音的评论正文与昵称**不暴露给无障碍服务** —— 2026-09-26 真机实测
+     * （uiautomator 全页 dump 仅 212 个节点，无任何评论文本、无昵称，id/content 节点 text 为空；
+     *   而截图里评论肉眼可见）。因此"在列表里读到自己的评论"这条路不可靠，
+     * 「评论数 +1」是唯一可读的正向证据。
+     *
+     * @return 读到的评论数；读不到返回 null（此时不做任何正向判定，保持保守的 unknown）
+     */
+    private fun readCommentCount(): Int? {
+        val re = Regex("评论(\\d+)")
+        return NodeFinder.snapshotTexts().firstNotNullOfOrNull { s ->
+            re.find(s)?.groupValues?.getOrNull(1)?.toIntOrNull()
+        }
+    }
+
+    /** 评论数是否增加（前后两个值都必须读到，否则视为不可判定 → 不产生正向结论） */
+    private fun commentCountGrew(before: Int?, after: Int?): Boolean =
+        before != null && after != null && after > before
 
     /** 记录终态并上报回执 */
     private suspend fun finish(outcome: Outcome, task: TaskPackageDto, reporter: Reporter): Outcome {
