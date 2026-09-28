@@ -32,6 +32,16 @@ function duration(task: TaskItem): string {
   return `${(ms / 1000).toFixed(1)}s`
 }
 
+/**
+ * 评论形态（`tasks.comment_type`）→ 中文。
+ *
+ * ⚠ 别与帖子池的「帖子类型」（`posts.post_type`）混为一谈：
+ * 那个说的是帖子是视频帖还是图文帖；这个说的是**这一条评论**带不带图，
+ * 由派单时按「图文 1/4、纯文字 3/4」的配比自动算出（见 `decideCommentType`）。
+ */
+const commentTypeLabel = (v: string | null): string =>
+  v === 'image' ? '图文评论' : v === 'text' ? '纯文字评论' : '-'
+
 export default function Tasks({ autoMs, refreshKey, notify }: Props) {
   // ── 筛选（全部服务端；前端 filter 在分页下只作用于当前页）──
   // 原来的「仅看 unknown」复选框被状态下拉取代：语义等价（选 unknown 即可），
@@ -131,7 +141,16 @@ export default function Tasks({ autoMs, refreshKey, notify }: Props) {
       )}
       {items.length > 0 && (
         <Table
-          head={['状态', '派发时间', '帖子', '设备', '形态', '话术 / 证据', '原因 / 耗时', '操作']}
+          head={[
+            '状态',
+            '派发时间',
+            '帖子',
+            '设备',
+            '评论形态',
+            '话术 / 证据',
+            '原因 / 耗时',
+            '操作',
+          ]}
         >
           {items.map((t) => (
             <tr key={t.id} className="hover:bg-slate-800/30">
@@ -150,7 +169,7 @@ export default function Tasks({ autoMs, refreshKey, notify }: Props) {
               <Td className="font-mono text-[11px] text-slate-500" >
                 {t.device_id ? shortId(t.device_id) : '-'}
               </Td>
-              <Td className="text-slate-400">{t.comment_type ?? '-'}</Td>
+              <Td className="text-slate-400">{commentTypeLabel(t.comment_type)}</Td>
               <Td className="max-w-[320px]">
                 {t.evidence ? (
                   <span className="font-mono text-[11px] text-sky-300">{t.evidence}</span>

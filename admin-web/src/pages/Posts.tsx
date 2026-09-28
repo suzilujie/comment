@@ -247,8 +247,10 @@ export default function Posts({ autoMs, refreshKey, notify }: Props) {
               ...(cities.data?.items ?? []).map((c) => ({ value: c.city, label: c.city })),
             ]}
           />
+          {/* 筛的是**帖子**类型（post_type）。「纯文字/图文」是评论形态（comment_type）的
+              措辞，用在这里等于筛错了轴 —— 视频帖同样会有纯文字评论，两者不是一回事。 */}
           <FilterSelect
-            label="形态"
+            label="帖子类型"
             value={fType}
             onChange={(v) => {
               setFType(v)
@@ -256,8 +258,8 @@ export default function Posts({ autoMs, refreshKey, notify }: Props) {
             }}
             options={[
               { value: 'all', label: '全部' },
-              { value: 'video', label: '纯文字' },
-              { value: 'image', label: '图文' },
+              { value: 'video', label: '视频帖' },
+              { value: 'image', label: '图文帖' },
             ]}
           />
           <FilterSelect
@@ -376,14 +378,18 @@ export default function Posts({ autoMs, refreshKey, notify }: Props) {
               )}
             </div>
             <div>
-              <div className="mb-1 text-[11px] text-slate-500">形态</div>
+              <div className="mb-1 text-[11px] text-slate-500">帖子类型</div>
               <select
                 value={form.postType}
                 onChange={(e) => setForm({ ...form, postType: e.target.value as 'video' | 'image' })}
                 className={inputCls}
               >
-                <option value="video">video（纯文字评论）</option>
-                <option value="image">image（图文评论，需有素材）</option>
+                {/* ⚠ 这里选的是**帖子**的类型，不是评论的形态 —— 这是两个字段：
+                    `posts.post_type`（本字段）vs `tasks.comment_type`（派单时按 1/4 配比自动决定）。
+                    原文案「video（纯文字评论）」把两个维度写进一行，读起来自相矛盾，
+                    也让人分不清到底在声明"这帖子是视频"还是"这帖的评论要纯文字"。 */}
+                <option value="video">视频帖（评论只能纯文字）</option>
+                <option value="image">图文帖（1/4 评论配图，需先在素材库补图）</option>
               </select>
             </div>
             <div>
@@ -446,7 +452,12 @@ export default function Posts({ autoMs, refreshKey, notify }: Props) {
               <tr key={p.id} className="hover:bg-slate-800/30">
                 <Td>
                   <span className="font-mono text-[11px] text-slate-300">{p.id}</span>
-                  {p.post_type && <span className="ml-1 text-slate-600">{p.post_type}</span>}
+                  {/* 显示中文而非裸 `video`/`image`：这一列是**帖子**类型 */}
+                  {p.post_type && (
+                    <span className="ml-1 text-slate-600">
+                      {p.post_type === 'image' ? '图文帖' : '视频帖'}
+                    </span>
+                  )}
                   {p.url && (
                     <div className="mt-0.5 max-w-[240px] truncate text-[11px] text-slate-600" title={p.url}>
                       {p.url}

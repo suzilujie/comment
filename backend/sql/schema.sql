@@ -67,6 +67,10 @@ CREATE INDEX IF NOT EXISTS idx_devices_eligible ON devices (admin_state, next_el
 CREATE TABLE IF NOT EXISTS posts (
   id               TEXT PRIMARY KEY,
   url              TEXT NOT NULL,                  -- 人工录入的抖音短链
+  -- **帖子**的类型：视频帖 / 图文帖（需求：「评论的帖子分为图文帖子和视频类型帖子」）。
+  -- ⚠ 与 tasks.comment_type 是**两个字段**：那个是**每条评论**的形态
+  --   （图文 1/4、纯文字 3/4），由派单时自动算出。本字段只决定"这帖是否参与图文配比"：
+  --   post_type='image' → 允许图文评论；否则一律纯文字（见 decideCommentType）。
   post_type        TEXT CHECK (post_type IN ('video', 'image')),
   city             TEXT NOT NULL,                  -- 调度口径：城市
   title            TEXT,
@@ -100,6 +104,8 @@ CREATE TABLE IF NOT EXISTS tasks (
   -- 素材（随任务携带）
   script_text      TEXT,
   script_id        TEXT,
+  -- **这一条评论**的形态：text=纯文字 / image=图文（需 image_hash 有值）。
+  -- ⚠ 别与 posts.post_type 混：那个是帖子类型，这个是评论形态，派单时按 1/4 配比自动决定。
   comment_type     TEXT CHECK (comment_type IN ('text', 'image')),
   image_hash       TEXT,
   image_path       TEXT,
