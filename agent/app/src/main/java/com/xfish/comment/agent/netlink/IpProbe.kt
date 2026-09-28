@@ -107,17 +107,22 @@ object IpProbe {
      */
     suspend fun probeFast(): Result? = withContext(Dispatchers.IO) {
         val ipv6Leak = detectIpv6Leak()
-        val ep = endpoints.first()
-        try {
-            val body = httpGet(ep.url, fastClient) ?: return@withContext null
-            val (ip, city, region) = parse(ep.kind, body)
-            if (ip.isNullOrBlank()) return@withContext null
-            Log.i(TAG, "fast exit ip=$ip region=${region.ifBlank { "-" }} via ${ep.name}")
-            Result(ip, region, city, ipv6Leak, ep.name)
-        } catch (e: Exception) {
-            Log.w(TAG, "fast probe failed: ${e.message}")
-            null
+        // ⚠ 至少试两个端点：切城的成败原本完全押在唯一首选端点上，而它是 **HTTP 明文**
+        // 的 ip-api —— 一旦被限流/不可达，所有省份的校验都会「探测失败」，
+        // 整轮切城白跑，且失败会被误归因成「新节点不通」，极难排查。
+        for (ep in endpoints.take(2)) {
+            try {
+                val body = httpGet(ep.url, fastClient) ?: continue
+                val (ip, city, region) = parse(ep.kind, body)
+                if (ip.isNullOrBlank()) continue
+                Log.i(TAG, "fast exit ip=$ip region=${region.ifBlank { "-" }} via ${ep.name}")
+                return@withContext Result(ip, region, city, ipv6Leak, ep.name)
+            } catch (e: Exception) {
+                Log.w(TAG, "fast probe failed via ${ep.name}: ${e.message}")
+            }
         }
+        Log.w(TAG, "fast probe: 全部端点失败（代理未连通？）")
+        null
     }
 
     /** 仅探测 IP */

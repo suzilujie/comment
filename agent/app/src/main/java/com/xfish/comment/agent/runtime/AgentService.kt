@@ -82,6 +82,19 @@ class AgentService : Service() {
         var busyTaskId: String? = null
             private set
 
+        /**
+         * 正在领取任务（claim 请求已发出、尚未进入执行）。
+         *
+         * 为什么需要它：`Api.claim()` 返回到 `runTask()` 置 `executing = true` 之间存在
+         * **挂起点**（`Prefs.markClaim` 是 DataStore IO）。该窗口内 `executing = false`
+         * 且 WAL 还没写入（WAL 由 TaskExecutor 落盘）→ `hasInFlightTask()` 返回 false
+         * → 切城循环据此认为「无在途任务」而开始切 IP → 刚领到的任务在执行时被判
+         * `ip_mismatch` 中止，白白浪费一次派发。
+         */
+        @Volatile
+        var claiming: Boolean = false
+            private set
+
         fun start(context: Context) {
             val intent = Intent(context, AgentService::class.java)
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
@@ -143,6 +156,10 @@ class AgentService : Service() {
 
     /** 等待期唤醒通道：让「立即领取」不必等满 30 秒切片 */
     private val claimWaker = Channel<Unit>(Channel.CONFLATED)
+
+    /** 连续「元素未命中类」失败次数：达阈值即暂停领取（见 [noteLocatorHealth]） */
+    @Volatile
+    private var locatorFailStreak: Int = 0
 
     /** 调试：一次性「立即切城」标志（消费后清空，不改变生产周期常量） */
     @Volatile
@@ -440,6 +457,27 @@ class AgentService : Service() {
                         delay(3_000)
                         continue
                     }
+                    // 定位器连续失效（抖音改版 / 换机型）→ 停领并告警：
+                    // 继续领只会持续浪费后台派发，并在后台堆积 element_missing / post_mismatch。
+                    // 不主动去操作抖音界面做探测（那会打断用户），而是从真实任务结果学习。
+                    if (locatorFailStreak >= Config.LOCATOR_FAIL_STREAK_PAUSE) {
+                        Log.w(
+                            TAG,
+                            "定位器连续失效 $locatorFailStreak 次，暂停领取 " +
+                                "${Config.LOCATOR_FAIL_PAUSE_MS / 60_000} 分钟（疑似抖音改版，需人工适配）",
+                        )
+                        reporter.sendEvent(
+                            event = "device_offline_notice",
+                            reasonCode = "locators_stale",
+                            detail = buildJsonObject {
+                                put("failStreak", locatorFailStreak)
+                                put("note", "连续元素未命中，疑似抖音改版，需人工适配定位器")
+                            },
+                        )
+                        locatorFailStreak = 0
+                        delay(Config.LOCATOR_FAIL_PAUSE_MS)
+                        continue
+                    }
                     if (!SelfCheck.accessibilityOk(this@AgentService)) {
                         // 无障碍不可用 → 领了也干不了，避免浪费任务
                         delay(20_000)
@@ -472,29 +510,36 @@ class AgentService : Service() {
                         continue
                     }
 
-                    val resp = Api.claim(
-                        ClaimReq(
-                            deviceId = Prefs.deviceId(this@AgentService),
-                            seq = Prefs.nextSeq(this@AgentService),
-                            sinceLastFinishSec = sinceLastFinishSec(),
-                        ),
-                    )
-                    Time.onServerTime(resp.serverTimeMs)
-                    Prefs.markClaim(this@AgentService)
+                    // 领取期间用 try/finally 保证 claiming 在**任何**离开路径上复位 ——
+                    // 否则一次异常退出就会永久卡住切城（hasInFlightTask 恒为 true）。
+                    claiming = true
+                    try {
+                        val resp = Api.claim(
+                            ClaimReq(
+                                deviceId = Prefs.deviceId(this@AgentService),
+                                seq = Prefs.nextSeq(this@AgentService),
+                                sinceLastFinishSec = sinceLastFinishSec(),
+                            ),
+                        )
+                        Time.onServerTime(resp.serverTimeMs)
+                        Prefs.markClaim(this@AgentService)
 
-                    val task = resp.task
-                    if (task == null) {
-                        val retry = (resp.retryAfterSeconds ?: Config.CLAIM_FALLBACK_RETRY_SECONDS)
-                        Log.d(TAG, "领取为空：${resp.reason ?: "-"}，${retry}s 后重试")
-                        Bus.emit(Bus.Events.TASK_EMPTY, resp.reason ?: "empty")
-                        // 退避期间同样允许被「立即领取」唤醒：
-                        // 否则手动触发要等满整个退避（曾出现点了两次都无响应、5 分钟后才生效）
-                        val backoffMs = retry.coerceAtLeast(Config.CLAIM_MIN_LOOP_SECONDS) * 1000L
-                        withTimeoutOrNull(backoffMs) { claimWaker.receive() }
-                        continue
+                        val task = resp.task
+                        if (task == null) {
+                            val retry = (resp.retryAfterSeconds ?: Config.CLAIM_FALLBACK_RETRY_SECONDS)
+                            Log.d(TAG, "领取为空：${resp.reason ?: "-"}，${retry}s 后重试")
+                            Bus.emit(Bus.Events.TASK_EMPTY, resp.reason ?: "empty")
+                            // 退避期间同样允许被「立即领取」唤醒：
+                            // 否则手动触发要等满整个退避（曾出现点了两次都无响应、5 分钟后才生效）
+                            val backoffMs = retry.coerceAtLeast(Config.CLAIM_MIN_LOOP_SECONDS) * 1000L
+                            withTimeoutOrNull(backoffMs) { claimWaker.receive() }
+                            continue
+                        }
+
+                        runTask(task)
+                    } finally {
+                        claiming = false
                     }
-
-                    runTask(task)
                 } catch (e: Exception) {
                     Log.w(TAG, "领取循环异常：${e.message}")
                     delay(20_000)
@@ -511,6 +556,7 @@ class AgentService : Service() {
         try {
             val outcome = TaskExecutor.execute(this, task, reporter)
             Log.i(TAG, "任务结束 ${task.taskId} → ${outcome.status}")
+            noteLocatorHealth(outcome)
         } catch (e: Exception) {
             Log.e(TAG, "任务执行抛出异常（执行器内部应已兜底）", e)
         } finally {
@@ -598,9 +644,38 @@ class AgentService : Service() {
         }
     }
 
+    /**
+     * 定位器健康度学习。
+     *
+     * 连续多次「元素未命中 / 没进入目标视频」失败，说明当前抖音版本（或新机型）
+     * 与内置定位器已不匹配 —— 此时继续领任务只会持续浪费后台派发。结果用于
+     * [startClaimLoop] 的停领门禁。
+     *
+     * 为什么不在领取前跑一遍 `probeCriticalLocators`：那需要唤起抖音、打开评论面板
+     * 再退回，会**直接打断用户**正在做的事；从真实任务结果学习零副作用，且样本更真实
+     * （真实帖子页 vs 自检的临时页面）。
+     */
+    private fun noteLocatorHealth(outcome: TaskExecutor.Outcome) {
+        val locatorFault = outcome.reasonCode == Config.Reason.ELEMENT_MISSING ||
+            outcome.reasonCode == Config.Reason.POST_MISMATCH
+        when {
+            locatorFault -> {
+                locatorFailStreak++
+                Log.w(TAG, "定位器疑似失效（连续 $locatorFailStreak 次）：${outcome.reasonCode}")
+            }
+
+            outcome.status == "succeeded" -> {
+                if (locatorFailStreak > 0) Log.i(TAG, "定位器恢复正常（此前连续失败 $locatorFailStreak 次）")
+                locatorFailStreak = 0
+            }
+        }
+    }
+
     /** 是否存在在途任务（切城的硬前置条件） */
     private suspend fun hasInFlightTask(): Boolean {
-        if (executing) return true
+        // claiming 也要算：claim 请求已发出、任务可能已在后台创建，此时切 IP
+        // 会让该任务在执行时被判 ip_mismatch（见 claiming 字段注释）。
+        if (executing || claiming) return true
         return runCatching { AgentDb.get(this).taskDao().findUnsettled().isNotEmpty() }
             .getOrDefault(false)
     }
@@ -741,7 +816,12 @@ class AgentService : Service() {
                     detail = buildJsonObject { put("ok", true); put("action", "restarting") },
                 )
                 delay(800)
-                scope.launch {
+                // ⚠ 必须用**独立作用域**：`scope` 会在 `onDestroy()` 里被 cancel，
+                // 而 stopSelf() 正是触发 onDestroy 的动作 —— 若用 scope.launch，
+                // 紧随其后的 delay/start 会被一并取消，**服务停掉后再也起不来**
+                // （回执却已上报 "restarting"，表现为"重启成功但设备静默失联"）。
+                CoroutineScope(SupervisorJob() + Dispatchers.Default).launch {
+                    delay(300)
                     stopSelf()
                     delay(1_500)
                     start(applicationContext)

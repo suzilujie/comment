@@ -220,9 +220,13 @@ object NodeFinder {
                 if (hit != null) return hit
             }
         }
-        // 6) 类名兜底
+        // 6) 类名兜底：按 clickableOnly 判定（与前面几级口径一致）。
+        //    ⚠ 早期实现无条件要求 `node.isClickable`：某个抖音版本的 EditText 若是
+        //    clickable=false，`editableField` 就会恒为 null —— 而它正是
+        //    `inputStillHasScript()` 的判据，于是「输入框是否仍有话术」永远返回 false，
+        //    提交判定与校验全部失真（读到的是"输入框已空"）。
         locator.className?.let { c ->
-            nodes.firstOrNull { it.className == c && it.clickable }?.let { return it.node }
+            nodes.firstOrNull { it.className == c && clickableOk(it, locator) }?.let { return it.node }
         }
         return null
     }

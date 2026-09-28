@@ -68,6 +68,17 @@ object Config {
     const val NOTIFY_CHANNEL_ID = "agent_foreground"
     const val NOTIFY_ID = 1001
 
+    /**
+     * 定位器连续失效多少次后暂停领取。
+     *
+     * 抖音改版（或换新机型）会让定位器整批失效，此时继续领任务只是持续浪费后台派发、
+     * 并在后台堆积 element_missing / post_mismatch。达到阈值后停领并告警，等人工适配。
+     */
+    const val LOCATOR_FAIL_STREAK_PAUSE = 3
+
+    /** 定位器失效后的暂停时长（毫秒） */
+    const val LOCATOR_FAIL_PAUSE_MS = 30 * 60_000L
+
     // ── 回执原因码（与后台约定，便于统计归因）───────────────────
     object Reason {
         const val IP_MISMATCH = "ip_mismatch"           // 出口属地与目标城市不一致

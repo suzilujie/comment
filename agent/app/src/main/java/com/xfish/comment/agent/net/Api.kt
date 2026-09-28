@@ -77,11 +77,19 @@ object Api {
 
             val url = baseUrl + path
             val startedAt = System.currentTimeMillis()
-            val request = Request.Builder()
-                .url(url)
-                .post(bodyJson.toRequestBody(mediaType))
-                .header("Accept", "application/json")
-                .build()
+            // URL 非法（后台地址被填错）时 Request.Builder 会抛 IllegalArgumentException：
+            // 那是构建期异常，调用方只按 ApiException 分派，会当成「未知异常」处理。
+            // 这里统一翻译成 Network，让上游的退避/重试逻辑能正确归类。
+            val request = try {
+                Request.Builder()
+                    .url(url)
+                    .post(bodyJson.toRequestBody(mediaType))
+                    .header("Accept", "application/json")
+                    .build()
+            } catch (e: IllegalArgumentException) {
+                Log.e(TAG, "后台地址非法：$url", e)
+                throw ApiException.Network("后台地址非法：${e.message}")
+            }
 
             val raw: String
             val code: Int

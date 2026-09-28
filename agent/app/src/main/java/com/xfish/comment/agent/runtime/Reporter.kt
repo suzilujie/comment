@@ -6,11 +6,13 @@ import com.xfish.comment.agent.core.Log
 import com.xfish.comment.agent.core.Time
 import com.xfish.comment.agent.data.AgentDb
 import com.xfish.comment.agent.data.EventRecord
+import com.xfish.comment.agent.data.LocalState
 import com.xfish.comment.agent.data.Prefs
 import com.xfish.comment.agent.data.ReceiptRecord
 import com.xfish.comment.agent.exec.TaskExecutor
 import com.xfish.comment.agent.net.AckResp
 import com.xfish.comment.agent.net.Api
+import com.xfish.comment.agent.net.ApiException
 import com.xfish.comment.agent.net.EventReq
 import com.xfish.comment.agent.net.ReceiptReq
 import com.xfish.comment.agent.net.TaskPackageDto
@@ -45,23 +47,25 @@ class Reporter(private val context: Context) : TaskExecutor.Reporter {
     }
 
     override suspend fun onFinished(task: TaskPackageDto, outcome: TaskExecutor.Outcome) {
+        // finishedAt 只取一次：它同时参与幂等键与请求体，写两次 nowMs() 会得到不同值
+        val finishedAt = outcome.finishedAt ?: Time.nowMs()
         val req = ReceiptReq(
             deviceId = Prefs.deviceId(context),
             taskId = task.taskId,
             status = outcome.status,
             reasonCode = outcome.reasonCode,
             evidence = outcome.evidence,
-            idempotencyKey = "${task.taskId}:${outcome.status}:${outcome.finishedAt ?: Time.nowMs()}",
+            idempotencyKey = "${task.taskId}:${outcome.status}:$finishedAt",
             startedAt = outcome.startedAt,
-            finishedAt = outcome.finishedAt ?: Time.nowMs(),
+            finishedAt = finishedAt,
             detail = outcome.detail,
         )
         val payload = json.encodeToString(ReceiptReq.serializer(), req)
 
         try {
             val ack = Api.receipt(req)
-            handleAck(task.taskId, ack)
-            markReported(task.taskId)
+            val normal = handleAck(task.taskId, ack)
+            markReported(task.taskId, normal)
             Log.i(TAG, "回执已送达：${task.taskId} → ${outcome.status}")
         } catch (e: Exception) {
             Log.w(TAG, "回执上报失败，转本地队列：${e.message}")
@@ -116,14 +120,22 @@ class Reporter(private val context: Context) : TaskExecutor.Reporter {
                 try {
                     val req = json.decodeFromString(ReceiptReq.serializer(), rec.payloadJson)
                     val ack = Api.receipt(req)
-                    handleAck(rec.taskId, ack)
-                    markReported(rec.taskId)
+                    val normal = handleAck(rec.taskId, ack)
+                    markReported(rec.taskId, normal)
                     db.receiptDao().delete(rec.id)
                     Log.i(TAG, "重传回执成功：${rec.taskId}（第 ${rec.attempts + 1} 次）")
                 } catch (e: Exception) {
                     db.receiptDao().bumpAttempts(rec.id)
-                    Log.w(TAG, "回执重传失败 ${rec.taskId}: ${e.message}")
-                    throw e // 网络仍未恢复，本轮不再继续
+                    if (isPermanentFailure(e)) {
+                        // ⚠ 服务端明确拒绝（4xx / 解析失败）时**必须丢弃并继续**：
+                        // 队列按 createdAt 顺序处理，留着这条毒记录会阻塞它后面**所有**回执
+                        // （早期直接 throw，一条坏记录能把整个队列拖到 attempts 耗尽）。
+                        Log.e(TAG, "回执被服务端拒绝，丢弃 ${rec.taskId}: ${e.message}")
+                        db.receiptDao().delete(rec.id)
+                    } else {
+                        Log.w(TAG, "回执重传失败 ${rec.taskId}: ${e.message}")
+                        throw e // 网络仍未恢复，本轮不再继续
+                    }
                 }
             }
             db.receiptDao().dropExhausted(MAX_ATTEMPTS)
@@ -138,7 +150,12 @@ class Reporter(private val context: Context) : TaskExecutor.Reporter {
                     db.eventDao().delete(rec.id)
                 } catch (e: Exception) {
                     db.eventDao().bumpAttempts(rec.id)
-                    throw e
+                    if (isPermanentFailure(e)) {
+                        Log.e(TAG, "事件被服务端拒绝，丢弃 ${rec.event}: ${e.message}")
+                        db.eventDao().delete(rec.id)
+                    } else {
+                        throw e
+                    }
                 }
             }
             db.eventDao().dropExhausted(MAX_ATTEMPTS)
@@ -153,22 +170,42 @@ class Reporter(private val context: Context) : TaskExecutor.Reporter {
 
     // ── 内部 ────────────────────────────────────────────────
 
-    /** 处理后台裁决：`unknown_no_retry` 时本地标记为不可重试（底线） */
-    private suspend fun handleAck(taskId: String, ack: AckResp) {
+    /**
+     * 处理后台裁决。
+     * @return true = 正常终结（本地记 `REPORTED`）；
+     *         false = 后台裁决为 `unknown_no_retry`，本地必须记 **`UNKNOWN`**（禁止自动重试）。
+     */
+    private suspend fun handleAck(taskId: String, ack: AckResp): Boolean {
         if (ack.walDecision == "unknown_no_retry") {
             Log.w(TAG, "后台裁决：$taskId 为 unknown，禁止重试（转人工）")
+            return false
         }
+        return true
     }
 
-    private suspend fun markReported(taskId: String) {
+    /**
+     * 落盘上报终态。
+     *
+     * ⚠ `normal = false`（后台裁决 `unknown_no_retry`）时必须落 **`UNKNOWN`** 而非 `REPORTED`：
+     * 早期无论裁决如何都记 `REPORTED`，等于把「禁止重试」这条底线丢了 ——
+     * 后台若重派同 taskId，本地幂等守卫就拦不住（见 TaskExecutor 步骤 0）。
+     */
+    private suspend fun markReported(taskId: String, normal: Boolean = true) {
         runCatching {
             AgentDb.get(context).taskDao().markFinished(
                 taskId,
-                com.xfish.comment.agent.data.LocalState.REPORTED,
-                null,
+                if (normal) LocalState.REPORTED else LocalState.UNKNOWN,
+                if (normal) null else "unknown_no_retry",
                 Time.nowMs(),
             )
         }
+    }
+
+    /** 「重传也不会成功」的失败：服务端 4xx、响应解析失败（网络类返回 false，需继续退避） */
+    private fun isPermanentFailure(e: Throwable): Boolean = when (e) {
+        is ApiException.Server -> e.status in 400..499
+        is ApiException.Parse -> true
+        else -> false
     }
 
     private suspend fun enqueueReceipt(
@@ -189,6 +226,9 @@ class Reporter(private val context: Context) : TaskExecutor.Reporter {
                     createdAt = Time.nowMs(),
                 ),
             )
+        }.onFailure {
+            // 早期静默吞掉：磁盘满 / DB 异常时回执会**无声丢失**，事后完全查不到
+            Log.e(TAG, "回执入队失败（该回执将丢失）：$taskId ${it.message}")
         }
     }
 
@@ -210,6 +250,6 @@ class Reporter(private val context: Context) : TaskExecutor.Reporter {
                     createdAt = Time.nowMs(),
                 ),
             )
-        }
+        }.onFailure { Log.e(TAG, "事件入队失败（该事件将丢失）：$event ${it.message}") }
     }
 }
