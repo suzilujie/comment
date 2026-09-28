@@ -1,4 +1,5 @@
-import { api, fmtGap, fmtTime } from '../api'
+import { api, COMMAND_KINDS, fmtGap, fmtTime } from '../api'
+import type { CommandKind } from '../api'
 import { Badge, Btn, Card, Empty, ErrorBox, Spinner, Table, Td, useFetch } from '../ui'
 
 interface Props {
@@ -33,10 +34,33 @@ export default function Devices({ autoMs, refreshKey, notify }: Props) {
     }
   }
 
+  /**
+   * 下发指令：写入 device_commands(pending)，随该设备**下一次心跳**送达（约 30 秒内），
+   * 设备执行后上报 command_result → 后台标记 done。可在「指令」页看进度。
+   */
+  const send = async (deviceId: string, kind: CommandKind) => {
+    const meta = COMMAND_KINDS.find((c) => c.kind === kind)
+    const ok = window.confirm(
+      `向设备下发「${meta?.label ?? kind}」？\n\n${meta?.hint ?? ''}\n\n` +
+        '指令会随该设备下一次心跳（约 30 秒内）送达；可在「指令」页查看是否执行成功。',
+    )
+    if (!ok) return
+    try {
+      const r = await api.sendCommand(deviceId, kind)
+      const cmdId = (r.detail as { commandId?: string } | undefined)?.commandId
+      notify(
+        r.ok ? `已下发「${meta?.label ?? kind}」${cmdId ? `（${cmdId}）` : ''}` : `下发失败：${r.error}`,
+        r.ok ? 'ok' : 'err',
+      )
+    } catch (e) {
+      notify(`下发失败：${e instanceof Error ? e.message : String(e)}`, 'err')
+    }
+  }
+
   return (
     <Card
       title="设备"
-      subtitle="按最后心跳倒序；「复位计数」用于换号或调试期归零日计数"
+      subtitle="按最后心跳倒序；「复位计数」归零日计数，「下发指令」可触发领取/切城/自检/暂停等"
       actions={
         <Btn onClick={dev.reload} disabled={dev.loading}>
           刷新
@@ -118,9 +142,29 @@ export default function Devices({ autoMs, refreshKey, notify }: Props) {
                 {x.next_eligible_at ? fmtTime(x.next_eligible_at) : '可领取'}
               </Td>
               <Td>
-                <Btn small onClick={() => void doReset(x.id, x.model)}>
-                  复位计数
-                </Btn>
+                <div className="flex items-center gap-1">
+                  <Btn small onClick={() => void doReset(x.id, x.model)}>
+                    复位计数
+                  </Btn>
+                  <select
+                    value=""
+                    disabled={!x.online}
+                    title={x.online ? '选择要下发的指令' : '设备离线 —— 指令会一直 pending，等它恢复心跳后才送达'}
+                    onChange={(e) => {
+                      const v = e.target.value
+                      if (v) void send(x.id, v as CommandKind)
+                      e.target.value = ''
+                    }}
+                    className="rounded-md border border-slate-700 bg-slate-800 px-1.5 py-1 text-[11px] text-slate-300 disabled:opacity-40"
+                  >
+                    <option value="">下发指令…</option>
+                    {COMMAND_KINDS.map((c) => (
+                      <option key={c.kind} value={c.kind}>
+                        {c.label}
+                      </option>
+                    ))}
+                  </select>
+                </div>
               </Td>
             </tr>
           ))}

@@ -1,9 +1,13 @@
 import { useEffect, useState } from 'react'
 import Login from './Login'
+import Cities from './pages/Cities'
+import Commands from './pages/Commands'
 import Devices from './pages/Devices'
 import Events from './pages/Events'
+import Materials from './pages/Materials'
 import Overview from './pages/Overview'
 import Posts from './pages/Posts'
+import Scripts from './pages/Scripts'
 import Tasks from './pages/Tasks'
 import { getToken, logout, setUnauthorizedHandler } from './api'
 import { Btn, ToastHost, useToasts } from './ui'
@@ -13,6 +17,10 @@ const TABS = [
   { key: 'devices', label: '设备' },
   { key: 'tasks', label: '任务' },
   { key: 'posts', label: '帖子池' },
+  { key: 'materials', label: '素材' },
+  { key: 'scripts', label: '话术' },
+  { key: 'cities', label: '城市池' },
+  { key: 'commands', label: '指令' },
   { key: 'events', label: '事件流' },
 ] as const
 
@@ -42,7 +50,7 @@ export default function App() {
         <div>
           <h1 className="text-lg font-semibold text-slate-100">评论投放 · 管理台</h1>
           <p className="mt-0.5 text-xs text-slate-500">
-            设备 / 任务 / 帖子池 / 事件流 · 写操作（复位、释放、订正）均写审计事件
+            监控：概览 / 设备 / 任务 / 事件流 · 配置：帖子池 / 素材 / 话术 / 城市池 · 运维：指令下发
           </p>
         </div>
         <div className="flex items-center gap-2">
@@ -93,6 +101,10 @@ export default function App() {
         {tab === 'devices' && <Devices {...common} />}
         {tab === 'tasks' && <Tasks {...common} />}
         {tab === 'posts' && <Posts {...common} />}
+        {tab === 'materials' && <Materials {...common} />}
+        {tab === 'scripts' && <Scripts {...common} />}
+        {tab === 'cities' && <Cities {...common} />}
+        {tab === 'commands' && <Commands {...common} />}
         {tab === 'events' && <Events {...common} />}
       </main>
 

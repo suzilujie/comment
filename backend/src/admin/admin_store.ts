@@ -11,12 +11,17 @@
  *  · 写操作必须留痕（订正走 task_store.appendEvent，actor=manual）；
  *  · 不在此处实现业务规则（配额、去重等仍归 dispatch/task_store 管）。
  */
+import { existsSync, rmSync } from 'node:fs'
+import { join } from 'node:path'
 import { db } from '../db_pg.js'
 import { config } from '../config.js'
 import { localDateKey } from '../datetime.js'
 import { createLogger } from '../logger.js'
 import { getPost } from '../post/post_store.js'
 import { finishTask, getTask } from '../task/task_store.js'
+import { makeId } from '../random.js'
+import { createCommand } from '../device/command_store.js'
+import type { Command } from '../contracts/platform.js'
 
 const log = createLogger('admin')
 
@@ -291,4 +296,361 @@ export async function resolveTask(
 
   log.info(`admin resolve task=${taskId} verdict=${verdict} device=${task.device_id ?? '-'}`)
   return { ok: true, detail: { taskId, verdict, status: updated?.status ?? null, evidence } }
+}
+
+// ══════════════════════════════════════════════════════════
+// ④ 配置类数据的 CRUD（帖子 / 素材 / 话术 / 城市池）
+//
+// 背景：这些表此前**没有任何管理入口** —— 加一个真实帖子、登记一张素材、
+// 改一条话术，都只能手写 SQL。下面把它们收敛成受控动作。
+// ══════════════════════════════════════════════════════════
+
+// ── 帖子 ──────────────────────────────────────────────────
+
+export interface PostInput {
+  id?: string
+  url: string
+  city: string
+  postType?: 'video' | 'image' | null
+  title?: string | null
+  targetCount?: number
+  status?: 'active' | 'paused' | 'done' | 'invalid'
+}
+
+/** 新增帖子 */
+export async function createPost(input: PostInput): Promise<OpResult> {
+  const sql = db()
+  const url = (input.url ?? '').trim()
+  const city = (input.city ?? '').trim()
+  if (!url) return { ok: false, error: 'url 不能为空' }
+  if (!city) return { ok: false, error: 'city 不能为空' }
+  const id = (input.id ?? '').trim() || makeId('post')
+  const target = Number.isFinite(input.targetCount) ? Number(input.targetCount) : 12
+  try {
+    await sql`
+      INSERT INTO posts (id, url, city, post_type, title, target_count, status, created_by)
+      VALUES (${id}, ${url}, ${city}, ${input.postType ?? 'video'}, ${input.title ?? null},
+              ${target}, ${input.status ?? 'active'}, 'admin_web')
+    `
+  } catch (e) {
+    const msg = (e as Error).message
+    if (msg.includes('uq_posts_url')) return { ok: false, error: '该 URL 已存在（posts.url 唯一）' }
+    if (msg.includes('posts_pkey')) return { ok: false, error: `帖子 id 已存在：${id}` }
+    return { ok: false, error: msg }
+  }
+  log.info(`admin create-post id=${id} city=${city} url=${url}`)
+  return { ok: true, detail: { id } }
+}
+
+/** 编辑帖子（只更新传入的字段） */
+export async function updatePost(id: string, patch: Partial<PostInput>): Promise<OpResult> {
+  const sql = db()
+  const url = patch.url?.trim() || null
+  const city = patch.city?.trim() || null
+  const target = Number.isFinite(patch.targetCount) ? Number(patch.targetCount) : null
+  try {
+    const rows = (await sql`
+      UPDATE posts SET
+        url = COALESCE(${url}, url),
+        city = COALESCE(${city}, city),
+        post_type = COALESCE(${patch.postType ?? null}, post_type),
+        title = COALESCE(${patch.title ?? null}, title),
+        target_count = COALESCE(${target}, target_count),
+        status = COALESCE(${patch.status ?? null}, status),
+        updated_at = NOW()
+      WHERE id = ${id}
+      RETURNING id
+    `) as unknown as { id: string }[]
+    if (rows.length === 0) return { ok: false, error: 'post not found' }
+  } catch (e) {
+    const msg = (e as Error).message
+    if (msg.includes('uq_posts_url')) return { ok: false, error: '该 URL 已被别的帖子占用' }
+    return { ok: false, error: msg }
+  }
+  log.info(`admin update-post id=${id} patch=${JSON.stringify(patch)}`)
+  return { ok: true, detail: { id } }
+}
+
+/**
+ * 删除帖子（连同它的任务/事件/素材占用一起删）。
+ *
+ * ⚠ 库里没有 ON DELETE CASCADE，只能手动级联 —— 顺序必须是「子表 → 主表」。
+ * 这会丢掉该帖的审计记录，因此前端会要求二次确认。
+ */
+export async function deletePost(id: string): Promise<OpResult> {
+  const sql = db()
+  const post = await getPost(id)
+  if (!post) return { ok: false, error: 'post not found' }
+
+  const ev = (await sql`
+    DELETE FROM task_events
+    WHERE task_id IN (SELECT id FROM tasks WHERE post_id = ${id}) RETURNING id
+  `) as unknown as { id: number }[]
+  // ⚠ post_material_usage 的主键是 (post_id, material_ref)，**没有 id 列** ——
+  // RETURNING 必须回它实际拥有的列。
+  const mu = (await sql`
+    DELETE FROM post_material_usage WHERE post_id = ${id} RETURNING post_id
+  `) as unknown as { post_id: string }[]
+  const tk = (await sql`
+    DELETE FROM tasks WHERE post_id = ${id} RETURNING id
+  `) as unknown as { id: string }[]
+  await sql`DELETE FROM posts WHERE id = ${id}`
+
+  log.info(
+    `admin delete-post id=${id} tasks=${tk.length} events=${ev.length} materials=${mu.length}`,
+  )
+  return {
+    ok: true,
+    detail: { id, removedTasks: tk.length, removedEvents: ev.length, removedMaterials: mu.length },
+  }
+}
+
+// ── 素材 ──────────────────────────────────────────────────
+
+export interface AdminMaterialRow {
+  id: string
+  hash: string
+  path: string
+  size_bytes: number | null
+  enabled: boolean
+  created_at: Date
+  /** 被多少个帖子用过（判断能否安全删除） */
+  used_by_posts: number
+}
+
+export async function listMaterials(): Promise<AdminMaterialRow[]> {
+  const sql = db()
+  return (await sql`
+    SELECT m.id, m.hash, m.path, m.size_bytes, m.enabled, m.created_at,
+           (SELECT COUNT(DISTINCT u.post_id)::int FROM post_material_usage u
+              WHERE u.material_ref = 'image:' || m.hash) AS used_by_posts
+    FROM materials m
+    ORDER BY m.created_at DESC
+  `) as unknown as AdminMaterialRow[]
+}
+
+/** 登记一张素材（文件由路由层写入磁盘，这里只落库） */
+export async function createMaterial(
+  hash: string,
+  path: string,
+  sizeBytes: number | null,
+): Promise<OpResult> {
+  const sql = db()
+  const id = `mat_${hash}`
+  try {
+    await sql`
+      INSERT INTO materials (id, hash, path, size_bytes, enabled)
+      VALUES (${id}, ${hash}, ${path}, ${sizeBytes}, TRUE)
+    `
+  } catch (e) {
+    const msg = (e as Error).message
+    if (msg.includes('uq_materials_hash')) return { ok: false, error: '相同内容的素材已存在（hash 重复）' }
+    return { ok: false, error: msg }
+  }
+  log.info(`admin create-material hash=${hash} size=${sizeBytes}`)
+  return { ok: true, detail: { id, hash, path } }
+}
+
+export async function updateMaterial(id: string, enabled: boolean): Promise<OpResult> {
+  const sql = db()
+  const rows = (await sql`
+    UPDATE materials SET enabled = ${enabled} WHERE id = ${id} RETURNING id
+  `) as unknown as { id: string }[]
+  if (rows.length === 0) return { ok: false, error: 'material not found' }
+  log.info(`admin update-material id=${id} enabled=${enabled}`)
+  return { ok: true, detail: { id, enabled } }
+}
+
+/** 删除素材：先删占用记录，再删库行，最后删磁盘文件 */
+export async function deleteMaterial(id: string): Promise<OpResult> {
+  const sql = db()
+  const rows = (await sql`
+    SELECT hash, path FROM materials WHERE id = ${id} LIMIT 1
+  `) as unknown as { hash: string; path: string }[]
+  const m = rows[0]
+  if (!m) return { ok: false, error: 'material not found' }
+
+  await sql`DELETE FROM post_material_usage WHERE material_ref = 'image:' || ${m.hash}`
+  await sql`DELETE FROM materials WHERE id = ${id}`
+  try {
+    const file = join(config.material.dir, m.path)
+    if (existsSync(file)) rmSync(file)
+  } catch {
+    // 文件删不掉不影响登记信息（下次上传同 hash 会覆盖）
+  }
+  log.info(`admin delete-material id=${id} hash=${m.hash}`)
+  return { ok: true, detail: { id, hash: m.hash } }
+}
+
+// ── 话术 ──────────────────────────────────────────────────
+
+export interface AdminScriptRow {
+  id: string
+  text: string
+  enabled: boolean
+  created_at: Date
+  /** 被多少个帖子用过 */
+  used_by_posts: number
+}
+
+export async function listScripts(): Promise<AdminScriptRow[]> {
+  const sql = db()
+  return (await sql`
+    SELECT s.id, s.text, s.enabled, s.created_at,
+           (SELECT COUNT(DISTINCT u.post_id)::int FROM post_material_usage u
+              WHERE u.material_ref = 'script:' || s.id) AS used_by_posts
+    FROM scripts s
+    ORDER BY s.created_at DESC
+  `) as unknown as AdminScriptRow[]
+}
+
+export async function createScript(text: string): Promise<OpResult> {
+  const sql = db()
+  const t = (text ?? '').trim()
+  if (!t) return { ok: false, error: '话术内容不能为空' }
+  const id = makeId('scr')
+  await sql`
+    INSERT INTO scripts (id, text, enabled) VALUES (${id}, ${t}, TRUE)
+  `
+  log.info(`admin create-script id=${id}`)
+  return { ok: true, detail: { id } }
+}
+
+export async function updateScript(
+  id: string,
+  patch: { text?: string; enabled?: boolean },
+): Promise<OpResult> {
+  const sql = db()
+  const text = patch.text?.trim() || null
+  const rows = (await sql`
+    UPDATE scripts SET
+      text = COALESCE(${text}, text),
+      enabled = COALESCE(${patch.enabled ?? null}, enabled)
+    WHERE id = ${id}
+    RETURNING id
+  `) as unknown as { id: string }[]
+  if (rows.length === 0) return { ok: false, error: 'script not found' }
+  log.info(`admin update-script id=${id}`)
+  return { ok: true, detail: { id } }
+}
+
+export async function deleteScript(id: string): Promise<OpResult> {
+  const sql = db()
+  await sql`DELETE FROM post_material_usage WHERE material_ref = 'script:' || ${id}`
+  const rows = (await sql`DELETE FROM scripts WHERE id = ${id} RETURNING id`) as unknown as {
+    id: string
+  }[]
+  if (rows.length === 0) return { ok: false, error: 'script not found' }
+  log.info(`admin delete-script id=${id}`)
+  return { ok: true, detail: { id } }
+}
+
+// ── 城市池 ────────────────────────────────────────────────
+
+export interface AdminCityRow {
+  city: string
+  slug: string
+  active: boolean
+  post_count: number
+  remark: string | null
+  updated_at: Date
+}
+
+export async function listCitiesAdmin(): Promise<AdminCityRow[]> {
+  const sql = db()
+  return (await sql`
+    SELECT city, slug, active, post_count, remark, updated_at
+    FROM city_pools
+    ORDER BY active DESC, post_count DESC, city
+  `) as unknown as AdminCityRow[]
+}
+
+export async function createCity(city: string, slug: string, remark?: string): Promise<OpResult> {
+  const sql = db()
+  const c = (city ?? '').trim()
+  const s = (slug ?? '').trim()
+  if (!c || !s) return { ok: false, error: 'city 与 slug 都不能为空' }
+  // slug 是 Clash 里的 group 名，格式统一成 province-xxx
+  const normalized = s.startsWith('province-') ? s : `province-${s}`
+  try {
+    await sql`
+      INSERT INTO city_pools (city, slug, active, post_count, remark)
+      VALUES (${c}, ${normalized}, TRUE, 0, ${remark ?? null})
+    `
+  } catch (e) {
+    const msg = (e as Error).message
+    if (msg.includes('city_pools_pkey')) return { ok: false, error: `省份已存在：${c}` }
+    if (msg.includes('uq_city_pools_slug')) return { ok: false, error: `slug 已存在：${normalized}` }
+    return { ok: false, error: msg }
+  }
+  log.info(`admin create-city city=${c} slug=${normalized}`)
+  return { ok: true, detail: { city: c, slug: normalized } }
+}
+
+export async function updateCity(city: string, active: boolean): Promise<OpResult> {
+  const sql = db()
+  const rows = (await sql`
+    UPDATE city_pools SET active = ${active}, updated_at = NOW()
+    WHERE city = ${city} RETURNING city
+  `) as unknown as { city: string }[]
+  if (rows.length === 0) return { ok: false, error: 'city not found' }
+  log.info(`admin update-city city=${city} active=${active}`)
+  return { ok: true, detail: { city, active } }
+}
+
+export async function deleteCity(city: string): Promise<OpResult> {
+  const sql = db()
+  const rows = (await sql`DELETE FROM city_pools WHERE city = ${city} RETURNING city`) as unknown as {
+    city: string
+  }[]
+  if (rows.length === 0) return { ok: false, error: 'city not found' }
+  log.info(`admin delete-city city=${city}`)
+  return { ok: true, detail: { city } }
+}
+
+// ── 设备指令下发 ──────────────────────────────────────────
+
+/**
+ * 下发设备指令（随该设备的下一次心跳送达）。
+ *
+ * 这补上了此前的缺口：`command_store.createCommand` 写好了但**全项目没有调用方**，
+ * 导致 pause / resume / probe / claim_now / rotate_now 等指令根本无从下发，
+ * 只能在数据库里手工 INSERT device_commands。
+ */
+export async function sendCommand(
+  deviceId: string,
+  kind: Command['kind'],
+  payload?: Record<string, unknown>,
+  ttlMinutes = 30,
+): Promise<OpResult> {
+  const sql = db()
+  const rows = (await sql`SELECT id FROM devices WHERE id = ${deviceId} LIMIT 1`) as unknown as {
+    id: string
+  }[]
+  if (rows.length === 0) return { ok: false, error: 'device not found' }
+  const commandId = await createCommand(deviceId, kind, payload, ttlMinutes)
+  log.info(`admin send-command device=${deviceId} kind=${kind} cmd=${commandId}`)
+  return { ok: true, detail: { commandId, kind, deviceId, ttlMinutes } }
+}
+
+export interface AdminCommandRow {
+  id: string
+  device_id: string
+  kind: string
+  status: string
+  created_at: Date
+  delivered_at: Date | null
+  finished_at: Date | null
+  result: unknown
+}
+
+/** 最近的指令记录（看是否送达、是否执行成功） */
+export async function listCommands(limit = 50): Promise<AdminCommandRow[]> {
+  const sql = db()
+  return (await sql`
+    SELECT id, device_id, kind, status, created_at, delivered_at, finished_at, result
+    FROM device_commands
+    ORDER BY created_at DESC
+    LIMIT ${limit}
+  `) as unknown as AdminCommandRow[]
 }

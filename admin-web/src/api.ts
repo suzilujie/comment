@@ -136,6 +136,58 @@ export interface OpResult {
   detail?: Record<string, unknown>
 }
 
+export interface MaterialItem {
+  id: string
+  hash: string
+  path: string
+  size_bytes: number | null
+  enabled: boolean
+  created_at: string
+  /** 被多少个帖子用过（>0 时删除会影响这些帖子的素材占用） */
+  used_by_posts: number
+}
+
+export interface ScriptItem {
+  id: string
+  text: string
+  enabled: boolean
+  created_at: string
+  used_by_posts: number
+}
+
+export interface CityItem {
+  city: string
+  slug: string
+  active: boolean
+  post_count: number
+  remark: string | null
+  updated_at: string
+}
+
+export interface CommandItem {
+  id: string
+  device_id: string
+  kind: string
+  status: string
+  created_at: string
+  delivered_at: string | null
+  finished_at: string | null
+  result: unknown
+}
+
+/** 管理台可下发的设备指令（与后台 SENDABLE_COMMANDS 保持一致） */
+export const COMMAND_KINDS = [
+  { kind: 'claim_now', label: '立即领取', hint: '跳过本机 30~60 分钟等待，立刻请求派单' },
+  { kind: 'rotate_now', label: '立即切城', hint: '跳过 2 天周期，立刻执行一次跨省切换' },
+  { kind: 'probe', label: '运行自检', hint: '采集机型/权限/出口/元素命中情况' },
+  { kind: 'pause', label: '暂停接单', hint: '设备停止领取任务' },
+  { kind: 'resume', label: '恢复接单', hint: '设备恢复领取任务' },
+  { kind: 'refresh_pool', label: '刷新城市池', hint: '立刻拉取一次城市池配置' },
+  { kind: 'restart', label: '重启服务', hint: '重启设备端常驻服务（不影响无障碍授权）' },
+] as const
+
+export type CommandKind = (typeof COMMAND_KINDS)[number]['kind']
+
 /**
  * 统一请求：自动携带 Bearer token。
  * `handle401: false` 用于登录接口自身 —— 否则会把「用户名或密码错误」
@@ -218,6 +270,118 @@ export const api = {
     req<OpResult>(`/tasks/${encodeURIComponent(taskId)}/resolve`, {
       method: 'POST',
       body: JSON.stringify({ verdict, note }),
+    }),
+
+  // ── 帖子 CRUD ─────────────────────────────────────────────
+
+  createPost: (input: {
+    id?: string
+    url: string
+    city: string
+    postType?: 'video' | 'image'
+    title?: string
+    targetCount?: number
+    status?: string
+  }) => req<OpResult>('/posts', { method: 'POST', body: JSON.stringify(input) }),
+
+  updatePost: (
+    id: string,
+    patch: {
+      url?: string
+      city?: string
+      postType?: 'video' | 'image'
+      title?: string
+      targetCount?: number
+      status?: string
+    },
+  ) => req<OpResult>(`/posts/${encodeURIComponent(id)}`, { method: 'PATCH', body: JSON.stringify(patch) }),
+
+  deletePost: (id: string) =>
+    req<OpResult>(`/posts/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+
+  // ── 素材 ──────────────────────────────────────────────────
+
+  materials: () => req<{ items: MaterialItem[] }>('/materials'),
+
+  /**
+   * 上传素材（multipart）。
+   *
+   * ⚠ 不能复用 `req()` —— 它固定设置 `Content-Type: application/json`，
+   * 而 multipart 的 boundary 必须由浏览器生成，手写会导致后台解析失败。
+   */
+  uploadMaterial: async (file: File): Promise<OpResult> => {
+    const token = getToken()
+    const fd = new FormData()
+    fd.append('file', file)
+    const res = await fetch(`${BASE}/materials`, {
+      method: 'POST',
+      headers: token ? { Authorization: `Bearer ${token}` } : {},
+      body: fd,
+    })
+    const text = await res.text()
+    let data: OpResult = { ok: false }
+    try {
+      data = (text ? JSON.parse(text) : { ok: false }) as OpResult
+    } catch {
+      data = { ok: false, error: text.slice(0, 200) }
+    }
+    if (res.status === 401) {
+      saveToken(null)
+      onUnauthorized?.()
+      throw new Error('登录已过期')
+    }
+    return data
+  },
+
+  updateMaterial: (id: string, enabled: boolean) =>
+    req<OpResult>(`/materials/${encodeURIComponent(id)}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ enabled }),
+    }),
+
+  deleteMaterial: (id: string) =>
+    req<OpResult>(`/materials/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+
+  // ── 话术 ──────────────────────────────────────────────────
+
+  scripts: () => req<{ items: ScriptItem[] }>('/scripts'),
+
+  createScript: (text: string) =>
+    req<OpResult>('/scripts', { method: 'POST', body: JSON.stringify({ text }) }),
+
+  updateScript: (id: string, patch: { text?: string; enabled?: boolean }) =>
+    req<OpResult>(`/scripts/${encodeURIComponent(id)}`, {
+      method: 'PATCH',
+      body: JSON.stringify(patch),
+    }),
+
+  deleteScript: (id: string) =>
+    req<OpResult>(`/scripts/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+
+  // ── 城市池 ────────────────────────────────────────────────
+
+  cities: () => req<{ items: CityItem[] }>('/city-pools'),
+
+  createCity: (city: string, slug: string) =>
+    req<OpResult>('/city-pools', { method: 'POST', body: JSON.stringify({ city, slug }) }),
+
+  updateCity: (city: string, active: boolean) =>
+    req<OpResult>(`/city-pools/${encodeURIComponent(city)}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ active }),
+    }),
+
+  deleteCity: (city: string) =>
+    req<OpResult>(`/city-pools/${encodeURIComponent(city)}`, { method: 'DELETE' }),
+
+  // ── 设备指令 ──────────────────────────────────────────────
+
+  commands: () => req<{ items: CommandItem[] }>('/commands'),
+
+  sendCommand: (deviceId: string, kind: CommandKind, payload?: Record<string, unknown>) =>
+    req<OpResult>(`/devices/${encodeURIComponent(deviceId)}/commands`, {
+      method: 'POST',
+      body: JSON.stringify({ kind, payload }),
     }),
 }
 
