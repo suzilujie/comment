@@ -13,6 +13,7 @@ import { cors } from 'hono/cors'
 import { serveStatic } from 'hono/bun'
 import { config } from './config.js'
 import { createLogger } from './logger.js'
+import { on, EVENTS } from './bus.js'
 import { closePg, ensureSchema, ping } from './db_pg.js'
 import { startScheduler, stopScheduler } from './scheduler.js'
 import { listDevices } from './device/device_store.js'
@@ -26,6 +27,25 @@ import receiptRoute from './agent_api/receipt_api.js'
 
 const log = createLogger('main')
 const app = new Hono()
+
+// ⚠ 必须注册 ALERT 订阅者。
+// `bus` 是「只发不收」的进程内事件总线，而全项目原本**零订阅者** ——
+// 于是设备离线 / 任务超期 / IPv6 泄露这些告警全部被静默丢弃，
+// 200 台设备上线后出故障将完全无人知晓。这里先落到日志（告警页可后续增强）。
+on(EVENTS.ALERT, (payload) => {
+  const p = payload as {
+    level?: string
+    code?: string
+    message?: string
+    deviceId?: string
+    taskId?: string
+  }
+  const line =
+    `[ALERT] code=${p.code ?? '-'} ${p.message ?? ''} ` +
+    `device=${p.deviceId ?? '-'} task=${p.taskId ?? '-'}`
+  if (p.level === 'error') log.error(line)
+  else log.warn(line)
+})
 
 app.use('*', cors())
 

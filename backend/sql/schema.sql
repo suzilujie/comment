@@ -50,6 +50,11 @@ CREATE TABLE IF NOT EXISTS devices (
   -- 运行时
   busy_task_id      TEXT,
   state             JSONB,                         -- 其余状态快照（原始上报）
+  -- 在线状态：心跳置 online、离线扫描置 offline。
+  -- 存在的意义是让离线扫描**只记一次状态迁移** —— 早期每 30 秒对每个离线设备
+  -- 无条件写一条 device_events，40 台离线就是 11.5 万条/天（只增不减）。
+  presence          TEXT NOT NULL DEFAULT 'online'
+                    CHECK (presence IN ('online', 'offline')),
   created_at        TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   updated_at        TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
@@ -70,12 +75,19 @@ CREATE TABLE IF NOT EXISTS posts (
   status           TEXT NOT NULL DEFAULT 'active'
                    CHECK (status IN ('active', 'paused', 'done', 'invalid')),
   last_comment_at  TIMESTAMPTZ,                    -- 单帖节奏约束依据
+  -- 已占用条数（succeeded / dispatched / executing / unknown）。
+  -- 用「计数字段 + 条件 UPDATE」原子占位，替代原来「先 COUNT 再插任务」的
+  -- check-then-act —— 200 台并发抢同一热帖时，原写法必然超发 target_count。
+  committed        INTEGER NOT NULL DEFAULT 0,
   created_by       TEXT,
   created_at       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   updated_at       TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 CREATE UNIQUE INDEX IF NOT EXISTS uq_posts_url ON posts (url);
 CREATE INDEX IF NOT EXISTS idx_posts_city_status ON posts (city, status);
+-- 候选帖按 `ORDER BY last_comment_at` 取：并进复合索引，避免「过滤后内存排序」
+CREATE INDEX IF NOT EXISTS idx_posts_city_status_last
+  ON posts (city, status, last_comment_at);
 
 -- ── 任务（派发那一刻创建；5 态；按设备归因） ──────────────────
 CREATE TABLE IF NOT EXISTS tasks (
@@ -106,6 +118,13 @@ CREATE TABLE IF NOT EXISTS tasks (
 CREATE INDEX IF NOT EXISTS idx_tasks_status_deadline ON tasks (status, deadline_at);
 CREATE INDEX IF NOT EXISTS idx_tasks_device_time ON tasks (device_id, dispatched_at DESC);
 CREATE INDEX IF NOT EXISTS idx_tasks_post_time ON tasks (post_id, dispatched_at DESC);
+-- 200 台规模化索引：同设备 × 同帖的当日去重查询（countDevicePostComments）
+CREATE INDEX IF NOT EXISTS idx_tasks_device_post ON tasks (device_id, post_id);
+-- 「一台设备同时只允许 1 条在途任务」的 **DB 级兜底**。
+-- 应用层是「先 SELECT 查在途、再 INSERT 任务」的 check-then-act，中间隔着十几次
+-- await（200 台并发时窗口很大），并发下真的会派两条；这条部分唯一索引把它变成硬约束。
+CREATE UNIQUE INDEX IF NOT EXISTS uq_tasks_device_inflight
+  ON tasks (device_id) WHERE status IN ('dispatched', 'executing');
 
 -- ── 任务事件流（追加写，用于归因与审计） ──────────────────────
 CREATE TABLE IF NOT EXISTS task_events (

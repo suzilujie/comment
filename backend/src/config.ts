@@ -104,7 +104,10 @@ export const config = {
   },
   pg: {
     url: str('PG_URL', 'postgres://postgres:postgres@127.0.0.1:5432/comment'),
-    poolMax: int('PG_POOL_MAX', 10),
+    // 200 台设备规模：连接池默认值从 10 提到 24。
+  // 心跳稳态约 6.7 QPS、单请求 10 条 SQL，10 个连接在突发（批量开机、重试风暴）时
+  // 会被瞬间排空并按「串行化」放大长尾 —— 而派单路径单请求更长，会被一起拖累。
+  poolMax: int('PG_POOL_MAX', 24),
   },
   dispatch: {
     dailyQuotaPerAccount: int('DAILY_QUOTA_PER_ACCOUNT', 20),

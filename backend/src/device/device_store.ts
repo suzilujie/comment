@@ -66,14 +66,15 @@ export async function applyHeartbeat(req: HeartbeatRequest): Promise<DeviceRow> 
                          last_seen_at, last_ip, last_ip_city, ipv6_leak,
                          accessibility_ok, foreground_ok, proxy_ok, battery,
                          storage_free_mb, clock_offset_sec, rule_pack_version,
-                         douyin_version, busy_task_id, state, created_at, updated_at)
+                         douyin_version, busy_task_id, state, presence, created_at, updated_at)
     VALUES (${req.deviceId}, ${req.profile?.model ?? null}, ${req.profile?.resolution ?? null},
             ${req.profile?.dpi ?? null}, ${req.profile?.osVersion ?? null}, ${req.profile?.romVersion ?? null},
             ${req.profile?.fontScale ?? null}, ${req.profile?.darkMode ?? null}, ${s.agentVersion},
             'enabled', NOW(), ${s.ip}, ${s.ipCity}, ${s.ipv6Leak ?? null},
             ${s.accessibilityOk}, ${s.foregroundOk}, ${s.proxyOk}, ${s.battery ?? null},
             ${s.storageFreeMb ?? null}, ${s.clockOffsetSec ?? null}, ${s.rulePackVersion ?? null},
-            ${s.douyinVersion ?? null}, ${req.busyTaskId ?? null}, ${JSON.stringify(s)}::jsonb, NOW(), NOW())
+            ${s.douyinVersion ?? null}, ${req.busyTaskId ?? null}, ${JSON.stringify(s)}::jsonb,
+            'online', NOW(), NOW())
     ON CONFLICT (id) DO UPDATE SET
       last_seen_at = EXCLUDED.last_seen_at,
       last_ip = EXCLUDED.last_ip,
@@ -97,6 +98,8 @@ export async function applyHeartbeat(req: HeartbeatRequest): Promise<DeviceRow> 
       font_scale = COALESCE(EXCLUDED.font_scale, devices.font_scale),
       dark_mode = COALESCE(EXCLUDED.dark_mode, devices.dark_mode),
       state = EXCLUDED.state,
+      -- 心跳即在线：把离线扫描置上的 presence 复位（离线判定见 scheduler.scanOfflineDevices）
+      presence = 'online',
       updated_at = NOW()
   `
 

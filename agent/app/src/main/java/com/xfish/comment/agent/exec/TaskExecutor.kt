@@ -264,7 +264,10 @@ object TaskExecutor {
                 }
                 delay(Rnd.long(900, 1_800))
             } else {
-                Log.i(TAG, "评论区已处于展开状态，跳过打开动作")
+                // 措辞要准：命中的可能是「详情页底部输入框」也可能是「已展开的面板输入框」，
+                // 两者占位文案相同、都无法区分。判据的实际含义是「输入框已经可见、可以直接输入」，
+                // 所以跳过打开动作是正确的。早期写成"评论区已处于展开状态"会让人误以为判定出错。
+                Log.i(TAG, "评论输入框已可见，跳过打开动作")
             }
             riskOrNull()?.let { return finish(it.copy(startedAt = startedAt), task, reporter) }
 

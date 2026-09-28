@@ -200,6 +200,13 @@ export async function finishTask(
         updated_at = NOW()
       WHERE id = ${task.post_id}
     `
+  } else if (status === 'failed' || status === 'aborted') {
+    // 释放派单时原子占用的帖子名额（见 dispatcher 的条件 UPDATE）。
+    // ⚠ `unknown` **不释放**：它的语义是「可能已发出」，占着名额才能防止同帖重复评论。
+    await sql`
+      UPDATE posts SET committed = GREATEST(committed - 1, 0), updated_at = NOW()
+      WHERE id = ${task.post_id}
+    `
   }
 
   if (task.device_id) {

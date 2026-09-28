@@ -48,6 +48,7 @@ export async function scanOfflineDevices(): Promise<number> {
             WHERE t.device_id = d.id AND t.status IN ('dispatched','executing')) AS inflight
     FROM devices d
     WHERE d.admin_state <> 'disabled'
+      AND d.presence <> 'offline'
       AND (d.last_seen_at IS NULL
            OR d.last_seen_at < NOW() - ${`${config.heartbeat.offlineAlertThresholdSeconds} seconds`}::interval)
   `) as unknown as {
@@ -63,6 +64,19 @@ export async function scanOfflineDevices(): Promise<number> {
     const seen = parseMs(d.last_seen_at)
     const gapSec = seen === null ? Number.POSITIVE_INFINITY : Math.floor((now - seen) / 1000)
     const manual = gapSec >= config.heartbeat.offlineManualThresholdSeconds
+
+    // ⚠ 只在 online → offline 的**状态迁移**时写事件与告警。
+    // 早期是「每个离线设备每 30 秒无条件 INSERT 一条」—— 40 台离线 = 11.5 万条/天
+    // device_events（只增不减），既撑爆表、又把真正的告警淹没了。
+    // 用 `UPDATE ... WHERE presence <> 'offline' RETURNING` 做成**原子**的状态迁移：
+    // 并发/重复扫描只会成功一次。
+    const moved = (await sql`
+      UPDATE devices SET presence = 'offline', updated_at = NOW()
+      WHERE id = ${d.id} AND presence <> 'offline'
+      RETURNING id
+    `) as unknown as { id: string }[]
+    if (moved.length === 0) continue
+
     await sql`
       INSERT INTO device_events (device_id, event, reason, detail)
       VALUES (${d.id}, 'offline', ${`gap=${gapSec === Number.POSITIVE_INFINITY ? 'never' : `${gapSec}s`}`},

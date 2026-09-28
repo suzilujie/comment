@@ -12,7 +12,21 @@ object Config {
     /** 心跳基准间隔：固定 30 秒 */
     const val HEARTBEAT_SECONDS = 30
     /** 心跳抖动比例：±10%（避免数十台设备同一秒打点） */
-    const val HEARTBEAT_JITTER_RATIO = 0.10
+    /**
+     * 心跳抖动比例。
+     *
+     * ⚠ 200 台规模下这个值很关键：稳态心跳若太整齐，就变成周期性洪峰。
+     * 0.20 = ±6 秒，把 200 台摊在 12 秒的窗口里（后台 onlineThreshold 完全能容忍）。
+     */
+    const val HEARTBEAT_JITTER_RATIO = 0.20
+
+    /**
+     * 首次心跳的**启动错峰上限**（毫秒）。
+     *
+     * 稳态有心跳抖动，但**首次心跳是同步的**（bootstrap 一完成就发）——
+     * 200 台批量安装 / 一起重启时会在同一秒内打后台。这里做一次性随机延迟摊开洪峰。
+     */
+    const val HEARTBEAT_STARTUP_JITTER_MS = 20_000L
     /** 心跳连续失败的退避上限（秒） */
     const val HEARTBEAT_MAX_BACKOFF_SECONDS = 300
 

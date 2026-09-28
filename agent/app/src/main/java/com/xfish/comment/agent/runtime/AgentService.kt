@@ -255,6 +255,7 @@ class AgentService : Service() {
         runCatching { CityRotator.onServiceStart(this) }
 
         startHeartbeatLoop()
+        startFlushLoop()
         startClaimLoop()
         startRotateLoop()
         startWatchLoop()
@@ -295,8 +296,17 @@ class AgentService : Service() {
      */
     private val heartbeatLock = Mutex()
 
+    /** 队列重传循环的 Job（与心跳解耦，见 [startFlushLoop]） */
+    private var flushJob: Job? = null
+
+    /** 单轮队列重传的总超时：超时就放手，绝不能让重传拖住心跳 */
+    private val FLUSH_TOTAL_TIMEOUT_MS = 20_000L
+
     private fun startHeartbeatLoop() {
         heartbeatJob = scope.launch {
+            // ⚠ 首次心跳必须错峰：稳态心跳有 ±20% 抖动，但**首次是同步的**
+            // （bootstrap 一完成就发）。200 台批量安装/重启会在同一秒内一起打后台。
+            delay(Rnd.long(0, Config.HEARTBEAT_STARTUP_JITTER_MS))
             while (isActive) {
                 val ok = runCatching { heartbeatLock.withLock { doHeartbeat() } }
                     .onFailure { Log.w(TAG, "心跳异常：${it.message}") }
@@ -307,8 +317,13 @@ class AgentService : Service() {
                     Rnd.jitterMs(Config.HEARTBEAT_SECONDS, Config.HEARTBEAT_JITTER_RATIO)
                 } else {
                     consecutiveHeartbeatFailures++
-                    val backoff = (30_000L * consecutiveHeartbeatFailures)
+                    val base = (30_000L * consecutiveHeartbeatFailures)
                         .coerceAtMost(Config.HEARTBEAT_MAX_BACKOFF_SECONDS * 1000L)
+                    // ⚠ 退避**必须带抖动**：200 台设备的心跳节拍本来就是同步的，
+                    // 若退避也是同一组固定值（30s/60s/…/300s），后台一重启就会收到
+                    // 「整齐划一的重试风暴」（thundering herd）—— 刚恢复的后台被再次压垮，
+                    // 陷入反复重启的循环。0.7~1.3 的抖动能把洪峰摊成一片。
+                    val backoff = Rnd.long((base * 7 / 10), (base * 13 / 10))
                     Log.w(TAG, "心跳失败第 $consecutiveHeartbeatFailures 次，退避 ${backoff / 1000}s")
                     Bus.emit(Bus.Events.HEARTBEAT_FAIL, "第 $consecutiveHeartbeatFailures 次")
                     backoff
@@ -319,12 +334,34 @@ class AgentService : Service() {
         }
     }
 
+    /**
+     * 队列重传循环（与心跳**解耦**）。
+     *
+     * ⚠ 早期 `flushQueues()` 是 `doHeartbeat()` 的第一行，而它是逐条串行 HTTP
+     * （最多 20 条回执 + 30 条事件，单条最坏 connect 10s + read 20s）——
+     * 队列一积压，心跳就被拖住（最坏 600 秒发不出心跳），后台据此判定设备离线；
+     * 而离线又意味着队列继续积压，形成「越积压越离线」的恶性循环。
+     * 现在独立成循环：每 60 秒跑一次、**总超时 20 秒**，跑不完下一轮继续。
+     */
+    private fun startFlushLoop() {
+        flushJob = scope.launch {
+            while (isActive) {
+                runCatching {
+                    val done = withTimeoutOrNull(FLUSH_TOTAL_TIMEOUT_MS) { reporter.flushQueues() }
+                    if (done == null) {
+                        Log.w(TAG, "队列重传超时（${FLUSH_TOTAL_TIMEOUT_MS / 1000}s），本轮放弃，下轮继续")
+                    }
+                }.onFailure { Log.w(TAG, "队列重传异常：${it.message}") }
+                delay(60_000L)
+            }
+        }
+    }
+
     private suspend fun doHeartbeat(): Boolean {
         val deviceId = Prefs.deviceId(this)
 
-        // 队列重传（断网期间积压的回执与事件）
-        reporter.flushQueues()
-
+        // ⚠ 队列重传**不在这里做**（已拆到 startFlushLoop）：
+        // 逐条串行 HTTP 会把心跳拖到超时，进而被判离线 —— 详见上面注释。
         val probe = ensureProbe()
 
         val walPending = AgentDb.get(this).taskDao().findUnsettled()

@@ -141,6 +141,109 @@ export async function decideCommentType(
   return imageCount < targetImage ? 'image' : 'text'
 }
 
+/** 可派发候选（一次查询求解出帖子 + 话术 + 图片 + 是否需要配图） */
+export interface DispatchCandidate {
+  id: string
+  url: string
+  post_type: string | null
+  script_id: string
+  script_text: string
+  image_hash: string | null
+  image_path: string | null
+  need_image: boolean
+}
+
+/**
+ * **一次查询**求出「本设备此刻可派发的帖子」（200 台规模的关键优化）。
+ *
+ * 背景：原实现是 `listCandidatePosts(city)` 取最多 20 个候选，再对**每个**候选帖
+ * 依次执行 `checkDevicePostOnce` / `checkPostQuota` / `checkPostPacing` /
+ * `decideCommentType` / `checkMaterialAvailable` / `pickUnusedScript` / `pickUnusedImage`
+ * —— 单次 claim 最坏 **20 × 9 + 18 ≈ 198 条串行 SQL**。200 台并发领取时会把连接池
+ * 瞬间排空并按「串行化」放大长尾，心跳跟着排队。
+ *
+ * 现在把全部约束下推到一条 SQL（全部是 EXISTS / 标量子查询，PostgreSQL 可以走索引）：
+ *  · 12/13 帖有余量（用 `committed` 计数，与原子占位同一口径）
+ *  · 14   单帖节奏
+ *  · 4    同设备 × 同帖当日未评论（口径同 `countDevicePostComments`）
+ *  · 15   还有未使用的话术；若本次需要配图，还必须有未使用的图片
+ *  · 形态 1/4 图文配比（口径同 `decideCommentType`，含 unknown 计占用）
+ *
+ * @param todayKey 调用方传入的 UTC+8 日期键（保持与 `localDateKey()` 同一口径）
+ * @param unknownOccupiesPostSlot 同 `config.dispatch.unknownOccupiesPostSlot`
+ */
+export async function findDispatchablePost(
+  deviceId: string,
+  city: string,
+  todayKey: string,
+  unknownOccupiesPostSlot: boolean,
+): Promise<DispatchCandidate | null> {
+  const sql = db()
+  const rows = (await sql`
+    WITH candidate AS (
+      SELECT p.id, p.url, p.post_type, p.committed, p.target_count, p.last_comment_at,
+             (SELECT COUNT(*)::int FROM tasks t1
+               WHERE t1.post_id = p.id AND t1.comment_type = 'image'
+                 AND t1.status IN ('succeeded', 'dispatched', 'executing')) AS image_count
+      FROM posts p
+      WHERE p.status = 'active'
+        AND p.city = ${city}
+        -- 12/13：仍有缺口
+        AND p.committed < p.target_count
+        -- 14：单帖节奏
+        AND (
+          p.last_comment_at IS NULL
+          OR p.last_comment_at < NOW() - ${`${config.dispatch.perPostMinIntervalMinutes} minutes`}::interval
+        )
+        -- 4：同设备 × 同帖当日未评论过（口径同 countDevicePostComments）
+        AND NOT EXISTS (
+          SELECT 1 FROM tasks t2
+          WHERE t2.device_id = ${deviceId} AND t2.post_id = p.id
+            AND (t2.dispatched_at AT TIME ZONE 'Asia/Shanghai')::date = ${todayKey}::date
+            AND (
+              t2.status IN ('succeeded', 'dispatched', 'executing')
+              OR (${unknownOccupiesPostSlot} AND t2.status = 'unknown')
+            )
+        )
+        -- 15：必须还有未使用的话术
+        AND EXISTS (
+          SELECT 1 FROM scripts s
+          WHERE s.enabled = TRUE
+            AND NOT EXISTS (SELECT 1 FROM post_material_usage u
+                            WHERE u.post_id = p.id AND u.material_ref = 'script:' || s.id)
+        )
+      ORDER BY p.last_comment_at ASC NULLS FIRST
+      LIMIT 30
+    )
+    SELECT c.id, c.url, c.post_type,
+           sc.id AS script_id, sc.text AS script_text,
+           im.hash AS image_hash, im.path AS image_path,
+           (
+             c.post_type = 'image'
+             AND c.image_count < GREATEST(1, ROUND((c.committed + 1)::numeric / 4))
+           ) AS need_image
+    FROM candidate c
+    LEFT JOIN LATERAL (
+      SELECT s.id, s.text FROM scripts s
+      WHERE s.enabled = TRUE
+        AND NOT EXISTS (SELECT 1 FROM post_material_usage u
+                        WHERE u.post_id = c.id AND u.material_ref = 'script:' || s.id)
+      ORDER BY random() LIMIT 1
+    ) sc ON TRUE
+    LEFT JOIN LATERAL (
+      SELECT m.hash, m.path FROM materials m
+      WHERE m.enabled = TRUE
+        AND NOT EXISTS (SELECT 1 FROM post_material_usage u
+                        WHERE u.post_id = c.id AND u.material_ref = 'image:' || m.hash)
+      ORDER BY random() LIMIT 1
+    ) im ON TRUE
+    WHERE sc.id IS NOT NULL
+  `) as unknown as DispatchCandidate[]
+
+  // 需要配图但没有可用图片的候选要跳过（原 checkMaterialAvailable + pickUnusedImage 的语义）
+  return rows.find((r) => !r.need_image || r.image_hash !== null) ?? null
+}
+
 /** 城市池：当前有帖子可评的城市（active） */
 export async function listCityPool(): Promise<{ city: string; slug: string }[]> {
   const sql = db()
