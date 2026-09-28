@@ -39,8 +39,30 @@ const inputCls =
  */
 export default function Posts({ autoMs, refreshKey, notify }: Props) {
   const posts = useFetch(() => api.posts(200), [refreshKey], autoMs)
+  // 省份池：属地是**精确匹配**的硬条件 —— 自由文本打错一个字（如「河北省」）帖子就
+  // 永远派不出去，而且不会有任何报错，只会在后台表现为「怎么一直没任务」。
+  // 不轮询（autoMs 默认 0）：省份池几乎不变，跟着 refreshKey 走即可。
+  const cities = useFetch(() => api.cities(), [refreshKey])
   const [form, setForm] = useState<FormState | null>(null)
   const [saving, setSaving] = useState(false)
+
+  /**
+   * 省份下拉选项：池中省份 +（编辑时）该帖当前值。
+   *
+   * ⚠ 必须把当前值也保留：历史数据里可能存在池中没有的省份（改名、停用、早期手工录入）。
+   * 若不保留，下拉会默认落到第一项 —— 用户只想改个标题，却把属地**静默改掉了**。
+   */
+  const cityOptions = (current: string | undefined) => {
+    const opts = (cities.data?.items ?? []).map((c) => ({
+      value: c.city,
+      label: c.active ? c.city : `${c.city}（省份池中已停用）`,
+    }))
+    const cur = (current ?? '').trim()
+    if (cur && !opts.some((o) => o.value === cur)) {
+      opts.unshift({ value: cur, label: `${cur}（不在省份池中）` })
+    }
+    return opts
+  }
 
   const release = async (postId: string, city: string) => {
     const ok = window.confirm(
@@ -74,7 +96,7 @@ export default function Posts({ autoMs, refreshKey, notify }: Props) {
       return
     }
     if (!form.city.trim()) {
-      notify('城市不能为空（要与设备出口属地一致，如「河北」）', 'err')
+      notify('请选择省份（属地是精确匹配条件，设备出口属地必须与之一致）', 'err')
       return
     }
     setSaving(true)
@@ -150,14 +172,25 @@ export default function Posts({ autoMs, refreshKey, notify }: Props) {
             </div>
             <div>
               <div className="mb-1 text-[11px] text-slate-500">
-                城市/省份 <span className="text-slate-600">（须与设备出口属地一致）</span>
+                省份 <span className="text-slate-600">（须与设备出口属地一致）</span>
               </div>
-              <input
+              <select
                 value={form.city}
                 onChange={(e) => setForm({ ...form, city: e.target.value })}
-                placeholder="河北"
                 className={inputCls}
-              />
+              >
+                <option value="">请选择省份…</option>
+                {cityOptions(form.city).map((o) => (
+                  <option key={o.value} value={o.value}>
+                    {o.label}
+                  </option>
+                ))}
+              </select>
+              <div className="mt-1 text-[10px] text-slate-600">
+                {cities.data && cities.data.items.length === 0
+                  ? '⚠ 省份池为空 —— 请先到「城市池」页添加省份，否则帖子永远派不出去'
+                  : '选自「城市池」；需要新省份请先到该页添加（属地是精确匹配，不匹配不会被派单）'}
+              </div>
             </div>
             <div>
               <div className="mb-1 text-[11px] text-slate-500">形态</div>
