@@ -63,6 +63,23 @@ object DouyinLocators {
         descContains = listOf("收藏"),
     )
 
+    /**
+     * 评论区**是否已展开**的判据。
+     *
+     * ⚠ 刻意**不含 `className` 兜底**：[commentInputEntry] 的最后一级回退是
+     * `className = "android.widget.EditText"`，而页面上任何 EditText（搜索框、
+     * 描述输入…）都会命中它 —— 拿它判定"面板是否已展开"会**必然误判为已展开**
+     * （2026-09-28 实测：连续两轮都打出"评论区已处于展开状态，跳过打开动作"）。
+     * 这里只用「评论专属文案 / contentDescription」，命中才代表评论面板确实在。
+     */
+    val commentPanelOpen = NodeFinder.Locator(
+        textContains = listOf(
+            "分享你此刻的想法", "发条评论", "说点什么", "留下你的精彩评论",
+            "善语结善缘", "发表你的评论", "写评论", "抢首评",
+        ),
+        descContains = listOf("评论输入", "输入评论"),
+    )
+
     /** 「打开抖音」系统确认弹窗（短链唤起时可能出现） */
     val openInAppConfirm = NodeFinder.Locator(
         textExact = listOf("打开", "打开抖音", "允许"),

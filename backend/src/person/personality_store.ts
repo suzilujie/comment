@@ -62,12 +62,40 @@ export function generateProfile(): { profile: Record<string, unknown>; bands: Re
   return { profile, bands }
 }
 
+/**
+ * jsonb 读取归一化。
+ *
+ * ⚠ 本项目踩过：写入写成 `${JSON.stringify(x)}::jsonb` 时参数会被**再序列化一次**，
+ * 落库变成「JSON 字符串」而不是 JSON 对象（psql 里显示成带引号的 `"{\"a\":1}"`）。
+ * 心跳下发时 zod 要求 `profile` 是 object → 直接 500 → **设备心跳全部失败**
+ * （2026-09-28 实测：personalities 一旦有数据，设备就持续 "心跳失败，退避 60s"）。
+ * 这里统一归一：字符串就再解析一次。
+ */
+function asJsonObject(v: unknown): Record<string, unknown> {
+  if (v == null) return {}
+  if (typeof v === 'string') {
+    try {
+      const parsed = JSON.parse(v) as unknown
+      return parsed !== null && typeof parsed === 'object' ? (parsed as Record<string, unknown>) : {}
+    } catch {
+      return {}
+    }
+  }
+  return typeof v === 'object' ? (v as Record<string, unknown>) : {}
+}
+
 export async function getPersonality(deviceId: string): Promise<PersonalityRow | null> {
   const sql = db()
   const rows = (await sql`
     SELECT device_id, profile, bands, version FROM personalities WHERE device_id = ${deviceId} LIMIT 1
   `) as unknown as PersonalityRow[]
-  return rows[0] ?? null
+  const r = rows[0]
+  if (!r) return null
+  return {
+    ...r,
+    profile: asJsonObject(r.profile),
+    bands: r.bands == null ? null : (asJsonObject(r.bands) as Record<string, string>),
+  }
 }
 
 /** 幂等生成：已存在则返回既有档案 */
@@ -77,9 +105,11 @@ export async function ensurePersonality(deviceId: string): Promise<PersonalityRo
 
   const { profile, bands } = generateProfile()
   const sql = db()
+  // ⚠ 用 `sql.json()` 而不是 `${JSON.stringify(x)}::jsonb`：后者会被再序列化一次，
+  // 落库成「JSON 字符串」而非对象，导致心跳下发时 zod 校验失败（见 getPersonality 注释）。
   await sql`
     INSERT INTO personalities (device_id, profile, bands, version)
-    VALUES (${deviceId}, ${JSON.stringify(profile)}::jsonb, ${JSON.stringify(bands)}::jsonb, 1)
+    VALUES (${deviceId}, ${sql.json(profile)}, ${sql.json(bands)}, 1)
     ON CONFLICT (device_id) DO NOTHING
   `
   log.info(`personality generated for ${deviceId}: ${JSON.stringify(bands)}`)

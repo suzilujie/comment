@@ -252,7 +252,10 @@ object TaskExecutor {
             // ── 步骤 8：打开评论区 → 先读几条评论（真人不会打开就发）──
             // 若面板已展开（抖音部分页面默认展开评论区），不要再去点「入口」——
             // 展开态下 commentEntry 的宽泛候选会命中 desc="缩小评论区" 的关闭按钮（39.7.0 实测）。
-            val panelAlreadyOpen = NodeFinder.find(DouyinLocators.commentInputEntry) != null
+            // ⚠ 判据用 commentPanelOpen（**不含 EditText 类名兜底**）：
+            // commentInputEntry 的最后一级回退是 className=EditText，页面任何输入框都会命中，
+            // 拿它判定"已展开"必然误判（实测连续两轮都跳过打开动作）。
+            val panelAlreadyOpen = NodeFinder.find(DouyinLocators.commentPanelOpen) != null
             if (!panelAlreadyOpen) {
                 val entry = NodeFinder.find(DouyinLocators.commentEntry)
                 if (entry == null || !Actions.click(entry)) {
@@ -358,7 +361,7 @@ object TaskExecutor {
                     // 同上：此刻已提交，风控只能归 unknown（禁止自动重试）
                     riskOrNull()?.let { return finish(it.asUnknownAfterSubmit(startedAt), task, reporter) }
                     // 面板收起时先重新展开（展开态下点 commentEntry 会命中「缩小评论区」，故先判）
-                    if (NodeFinder.find(DouyinLocators.commentInputEntry) == null) {
+                    if (NodeFinder.find(DouyinLocators.commentPanelOpen) == null) {
                         NodeFinder.find(DouyinLocators.commentEntry)?.let { Actions.click(it) }
                         delay(Rnd.long(800, 1_400))
                     }

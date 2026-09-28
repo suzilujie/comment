@@ -12,7 +12,7 @@ import { applyHeartbeat } from '../device/device_store.js'
 import { eligibleForTask } from '../dispatch/dispatcher.js'
 import { listCityPool } from '../post/post_store.js'
 import { takePendingCommands } from '../device/command_store.js'
-import { getPersonality } from '../person/personality_store.js'
+import { ensurePersonality } from '../person/personality_store.js'
 import { buildHeartbeatResponse } from '../contracts/assembler.js'
 import { guard } from './guard.js'
 
@@ -62,13 +62,21 @@ route.post('/', async (c) => {
   })
 })
 
-/** 载入人格档案（表可能为空；P3 之前返回 undefined） */
+/**
+ * 载入人格档案；**不存在则生成**（一设备一份、长期稳定）。
+ *
+ * ⚠ 早期只调 `getPersonality`，而生成函数 `ensurePersonality` **全项目没有调用方** ——
+ * 于是 `personalities` 表永远为空、心跳下发的 `personality` 恒为 undefined，
+ * 设备端只能一直打印「未下发人格档案，使用内置默认参数」，人格多样性完全没生效。
+ * `ensurePersonality` 自身是幂等的（先查，再 `INSERT ... ON CONFLICT DO NOTHING`），
+ * 所以放在心跳路径上是安全的（已存在的设备只多一次 SELECT）。
+ */
 async function loadPersonality(
   deviceId: string | null,
 ): Promise<{ version: number; profile: Record<string, unknown> } | undefined> {
   if (!deviceId) return undefined
-  const p = await getPersonality(deviceId)
-  return p ? { version: p.version, profile: p.profile } : undefined
+  const p = await ensurePersonality(deviceId)
+  return { version: p.version, profile: p.profile }
 }
 
 export default route
