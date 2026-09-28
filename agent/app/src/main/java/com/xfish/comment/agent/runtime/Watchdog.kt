@@ -39,7 +39,9 @@ object Watchdog {
         if (!a11y) {
             a11yDownCount++
             Log.w(TAG, "无障碍服务不可用（第 $a11yDownCount 次检测）")
-            if (a11yDownCount == 2) {
+            // ⚠ 用 >= 而非 ==：早期写 == 2，导致「第 2 次报过一次之后再无信号」——
+            // 无障碍长期掉线时后台只能收到一次告警，之后完全静默，没人知道设备已废。
+            if (a11yDownCount >= 2) {
                 Bus.emit(Bus.Events.A11Y_DISCONNECTED)
                 needHuman = true
             }

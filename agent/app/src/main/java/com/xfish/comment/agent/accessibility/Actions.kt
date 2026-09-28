@@ -18,6 +18,7 @@ import com.xfish.comment.agent.core.Rnd
 import com.xfish.comment.agent.core.Time
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlin.coroutines.resume
 
 /**
@@ -322,22 +323,32 @@ object Actions {
 
     // ── 手势派发 ─────────────────────────────────────────────
 
+    /** 手势回调超时：正常滑动/点击在数百毫秒内完成，5 秒足够 */
+    private const val GESTURE_TIMEOUT_MS = 5_000L
+
     private suspend fun dispatch(stroke: GestureDescription.StrokeDescription): Boolean {
         val svc = AutoService.get() ?: return false
         val gesture = GestureDescription.Builder().addStroke(stroke).build()
-        return suspendCancellableCoroutine { cont ->
-            val callback = object : AccessibilityService.GestureResultCallback() {
-                override fun onCompleted(gestureDescription: GestureDescription?) {
-                    if (cont.isActive) cont.resume(true)
-                }
+        // ⚠ 必须带超时：dispatchGesture 的回调在「无障碍服务被系统回收」「手势被吞掉」
+        // 等情况下**可能永远不触发**，而 suspendCancellableCoroutine 会一直挂起 ——
+        // 表现为整个任务卡在 executing（既不评论也不回执），只有服务被销毁才解除。
+        val ok = withTimeoutOrNull(GESTURE_TIMEOUT_MS) {
+            suspendCancellableCoroutine { cont ->
+                val callback = object : AccessibilityService.GestureResultCallback() {
+                    override fun onCompleted(gestureDescription: GestureDescription?) {
+                        if (cont.isActive) cont.resume(true)
+                    }
 
-                override fun onCancelled(gestureDescription: GestureDescription?) {
-                    if (cont.isActive) cont.resume(false)
+                    override fun onCancelled(gestureDescription: GestureDescription?) {
+                        if (cont.isActive) cont.resume(false)
+                    }
                 }
+                val accepted = svc.dispatchGesture(gesture, callback, null)
+                if (!accepted && cont.isActive) cont.resume(false)
             }
-            val accepted = svc.dispatchGesture(gesture, callback, null)
-            if (!accepted && cont.isActive) cont.resume(false)
         }
+        if (ok == null) Log.w(TAG, "手势派发超时（${GESTURE_TIMEOUT_MS}ms 内无回调），按失败处理")
+        return ok == true
     }
 
     /** 「忽略电池优化」跳转（自检引导用） */

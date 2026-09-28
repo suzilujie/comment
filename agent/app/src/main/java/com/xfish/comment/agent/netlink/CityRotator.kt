@@ -122,6 +122,9 @@ object CityRotator {
         val pool = loadCityPool(context)
         if (pool.size < 2) {
             Log.w(TAG, "省份池不足（${pool.size} 个），跳过切城")
+            // ⚠ 必须重排：否则 nextIpSwitchAt 永远停在过去 → isDue() 恒真 →
+            // 每 5 分钟的检查切片都进来空转一遍并刷日志（属配置问题，等下一周期）。
+            reschedule(context, retrySoon = false)
             return@withContext null
         }
         // 已切换到的省份（省名，不是 slug —— 组名对所有省份都相同，无法区分当前在哪）
@@ -146,6 +149,8 @@ object CityRotator {
             .take(Config.IP_SWITCH_MAX_REGION_ATTEMPTS)
         if (candidates.isEmpty()) {
             Log.w(TAG, "排除当前省份后无可选目标（池=${pool.size}，当前=$currentRegion）")
+            // 同上：属配置问题（池里只剩当前省 / 省份名重复），等下一周期，别每 5 分钟空转
+            reschedule(context, retrySoon = false)
             return@withContext null
         }
         Log.i(TAG, "本轮候选省份：${candidates.joinToString("、") { it.city }}")

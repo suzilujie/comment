@@ -53,7 +53,15 @@ object RiskGuard {
         // 「是否弹窗样式」：存在关闭类按钮文案
         val overlay = texts.any { t -> DISMISS_TEXTS.any { d -> t == d || t.contains(d) } }
 
-        // 1) 验证码 / 安全验证（通常伴随输入框或滑块）
+        // 1) 验证码 / 安全验证
+        //    强特征（"拖动滑块"/"安全验证"…）命中即判定：滑块验证页往往**只有滑块**，
+        //    没有任何「确定/取消」按钮，早期统一要求 overlay → 滑块验证被漏检 →
+        //    然后在验证页上继续点发送（典型的「该中止却继续」，风控风险最高的一类）。
+        //    弱特征（正文里也可能出现的「验证」二字）仍要求弹窗结构，避免误报。
+        firstHit(DouyinLocators.captchaStrongKeywords)?.let { hit ->
+            Log.w(TAG, "检测到验证页（强特征）：$hit")
+            return Signal.CAPTCHA
+        }
         firstHit(DouyinLocators.captchaKeywords)?.let { hit ->
             if (overlay) {
                 Log.w(TAG, "检测到验证类提示：$hit")
@@ -67,7 +75,13 @@ object RiskGuard {
             return Signal.RISK_DIALOG
         }
 
-        // 3) 限流（需同时是弹窗/提示样式，避免正文误判）
+        // 3) 限流
+        //    强特征（"操作频繁"/"操作太快"）正文里几乎不会出现，命中即判定；
+        //    弱特征（"网络繁忙"/"稍后再试"）可能只是普通网络提示，仍要求弹窗结构。
+        firstHit(DouyinLocators.rateLimitStrongKeywords)?.let { hit ->
+            Log.w(TAG, "检测到限流（强特征）：$hit")
+            return Signal.RATE_LIMIT
+        }
         firstHit(DouyinLocators.rateLimitKeywords)?.let { hit ->
             if (overlay) {
                 Log.w(TAG, "检测到限流提示：$hit")

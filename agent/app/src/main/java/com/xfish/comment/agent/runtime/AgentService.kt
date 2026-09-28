@@ -75,6 +75,11 @@ class AgentService : Service() {
         var executing: Boolean = false
             private set
 
+        /** 当前正在执行的任务号（随心跳上报，让后台知道设备在忙哪一条） */
+        @Volatile
+        var busyTaskId: String? = null
+            private set
+
         fun start(context: Context) {
             val intent = Intent(context, AgentService::class.java)
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
@@ -321,7 +326,8 @@ class AgentService : Service() {
                 clockOffsetSec = Time.clockOffsetSec(),
             ),
             profile = SelfCheck.profile(this),
-            busyTaskId = null,
+            // 契约字段：设备当前在忙哪条任务（由 runTask 维护；早期恒 null，该字段形同虚设）
+            busyTaskId = AgentService.busyTaskId,
             walPending = walPending,
             at = System.currentTimeMillis(),
         )
@@ -353,8 +359,18 @@ class AgentService : Service() {
         // 规则包版本
         resp.rulePackVersion?.let { Prefs.setRulePackVersion(this, it) }
 
-        // 指令
+        // 指令：按 commandId 去重 + 过期判定。
+        // 后台虽有 delivered 标记，但回执丢失时仍可能重复下发 —— 而 rotate_now / restart
+        // 这类指令重复执行的副作用不小（连续切城、连续重启服务）。
         for (cmd in resp.commands) {
+            if (isCommandExpired(cmd.expireAt)) {
+                Log.w(TAG, "指令已过期，忽略：${cmd.kind}（${cmd.commandId}）")
+                continue
+            }
+            if (!markCommandHandled(cmd.commandId)) {
+                Log.i(TAG, "指令已处理过，跳过：${cmd.kind}（${cmd.commandId}）")
+                continue
+            }
             runCatching { handleCommand(cmd) }
                 .onFailure { Log.w(TAG, "指令处理失败 ${cmd.kind}: ${it.message}") }
         }
@@ -479,6 +495,7 @@ class AgentService : Service() {
 
     private suspend fun runTask(task: TaskPackageDto) {
         executing = true
+        busyTaskId = task.taskId
         Notify.update(this, "执行中：${task.postId}")
         Bus.emit(Bus.Events.TASK_CLAIMED, task)
         try {
@@ -488,6 +505,7 @@ class AgentService : Service() {
             Log.e(TAG, "任务执行抛出异常（执行器内部应已兜底）", e)
         } finally {
             executing = false
+            busyTaskId = null
             // 重置「可领取时刻」：距本次完成 + 随机 30–60 分钟
             val next = Time.nowMs() + Rnd.long(
                 Config.CLAIM_MIN_INTERVAL_MIN * 60_000L,
@@ -602,6 +620,27 @@ class AgentService : Service() {
     }
 
     // ── 指令处理 ─────────────────────────────────────────────
+
+    /** 已处理指令 ID → 处理时刻（单调时钟），用于防御性去重 */
+    private val handledCommandIds = java.util.concurrent.ConcurrentHashMap<String, Long>()
+
+    /** @return true = 首次处理（应执行）；false = 已处理过（跳过） */
+    private fun markCommandHandled(id: String): Boolean {
+        val now = Time.elapsedMs()
+        // 超过 64 条时清理 1 小时前的记录，避免长期运行无限增长
+        if (handledCommandIds.size > 64) {
+            handledCommandIds.entries.removeIf { now - it.value > 3_600_000L }
+        }
+        return handledCommandIds.putIfAbsent(id, now) == null
+    }
+
+    /** 指令是否已过期（expireAt 为 ISO 串；解析失败按「未过期」处理，宁可执行也不漏） */
+    private fun isCommandExpired(expireAt: String?): Boolean {
+        if (expireAt.isNullOrBlank()) return false
+        return runCatching {
+            java.time.OffsetDateTime.parse(expireAt).toInstant().toEpochMilli() < System.currentTimeMillis()
+        }.getOrDefault(false)
+    }
 
     private suspend fun handleCommand(cmd: CommandDto) {
         Log.i(TAG, "收到指令：${cmd.kind}（${cmd.commandId}）")
