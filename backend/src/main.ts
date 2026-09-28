@@ -102,7 +102,17 @@ app.get('/api/tasks', async (c) => {
 app.get('/api/city-pool', async (c) => c.json({ items: await listCityPool() }))
 
 // ── 素材下载（内网通道）──────────────────────────────────────
-app.use('/materials/*', serveStatic({ root: config.material.dir }))
+// ⚠ Hono 的 serveStatic 是 `root + 完整请求路径` 拼接的：不剥掉挂载前缀的话，
+//    /materials/x.jpg 会去找 <root>/materials/x.jpg，而文件实际在 <root>/x.jpg
+//    —— 结果是**素材下载通道全量 404**（设备永远拉不到图，图文评论必然失败，
+//    而设备侧只会报 material_download_failed，看不出是后台路由配错了）。
+app.use(
+  '/materials/*',
+  serveStatic({
+    root: config.material.dir,
+    rewriteRequestPath: (p) => p.replace(/^\/materials/, ''),
+  }),
+)
 
 // ── Clash provider 文件（P2：节点定义下发；当前未实现）───────
 app.get('/providers/*', (c) =>

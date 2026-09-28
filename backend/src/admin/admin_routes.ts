@@ -235,11 +235,20 @@ admin.post('/materials', async (c) => {
 
   const r = await createMaterial(stored, stored, buf.length)
   if (!r.ok) {
-    // 登记失败（多为 hash 重复）→ 删掉刚写的文件，避免留下孤儿素材
-    try {
-      rmSync(abs)
-    } catch {
-      /* ignore */
+    // ⚠ 只在「真的写库失败」时回滚删文件。
+    //
+    // 重复上传**绝不能删**：内容寻址存储下，重复内容的 `stored` 与**已登记素材是同一个
+    // 文件名** —— 无条件 rmSync 会把那条素材的文件一起删掉，留下「库里有记录、磁盘上没
+    // 文件」的幽灵条目，而且**不可恢复**（hash 已被占用，重传会被去重拒绝）。
+    // 设备侧的表现是永久 404，日志里只会说 material_download_failed，极难归因。
+    // 反过来，保留文件还能顺带修复历史上被误删的那些。
+    const duplicate = r.detail?.duplicate === true
+    if (!duplicate) {
+      try {
+        rmSync(abs)
+      } catch {
+        /* ignore */
+      }
     }
     return c.json(r, 200)
   }

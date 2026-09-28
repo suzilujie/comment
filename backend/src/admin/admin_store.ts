@@ -474,7 +474,18 @@ export async function createMaterial(
     `
   } catch (e) {
     const msg = (e as Error).message
-    if (msg.includes('uq_materials_hash')) return { ok: false, error: '相同内容的素材已存在（hash 重复）' }
+    // ⚠ 去重实际撞的是**主键** `materials_pkey`：id 就是 `mat_<hash>`，
+    //    所以同内容素材会先在 PK 上冲突，永远走不到 `uq_materials_hash` 那条分支 ——
+    //    早期只判后者，导致用户看到的是原始 Postgres 报错而不是这句人话。
+    if (msg.includes('materials_pkey') || msg.includes('uq_materials_hash')) {
+      // `duplicate` 让调用方能区分「只是重复上传」与「真的写库失败」：
+      // 前者**绝不能删文件**（那是已登记素材的文件，见 admin_routes 的回滚逻辑）
+      return {
+        ok: false,
+        error: '相同内容的素材已存在（按内容去重，无需重复上传）',
+        detail: { duplicate: true },
+      }
+    }
     return { ok: false, error: msg }
   }
   log.info(`admin create-material hash=${hash} size=${sizeBytes}`)
