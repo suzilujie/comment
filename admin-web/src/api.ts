@@ -114,6 +114,11 @@ export interface PostItem {
   succeeded: number
   unknown: number
   failed: number
+  /**
+   * 当前派不出去的原因（`null` = 可派）。
+   * 典型值：`话术已用尽` / `图文帖缺图片` —— 需要人工补素材，不是"这个省没活"。
+   */
+  blocked_reason: string | null
 }
 
 export interface EventItem {

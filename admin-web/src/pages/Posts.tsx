@@ -180,7 +180,7 @@ export default function Posts({ autoMs, refreshKey, notify }: Props) {
   return (
     <Card
       title="帖子池"
-      subtitle="committed = 已占用条数（成功 + 在途 + unknown）；today_used > 0 表示今天该帖已被占用过"
+      subtitle="committed = 已占用条数（成功 + 在途 + unknown）；状态旁的黄色标记 = 该帖有余量但派不出去（需补素材）"
       actions={
         <div className="flex gap-2">
           <Btn onClick={() => setForm(emptyForm())} disabled={form !== null}>
@@ -347,6 +347,12 @@ export default function Posts({ autoMs, refreshKey, notify }: Props) {
                 <Td className="text-slate-400">{p.city}</Td>
                 <Td>
                   <Badge tone={statusTone(p.status)}>{p.status}</Badge>
+                  {/* 有余量却派不出去 → 多半是缺素材，必须让人一眼看见（否则只会表现为"一直没有任务"） */}
+                  {p.blocked_reason && (
+                    <div className="mt-0.5">
+                      <Badge tone="warn">{p.blocked_reason}</Badge>
+                    </div>
+                  )}
                 </Td>
                 <Td>
                   <div className="flex items-center gap-2">

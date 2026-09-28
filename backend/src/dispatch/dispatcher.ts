@@ -10,7 +10,7 @@
  */
 import { config } from '../config.js'
 import { createLogger } from '../logger.js'
-import { addMinutes, localDateKey, localDayRange, nowMs, parseMs } from '../datetime.js'
+import { addMinutes, localDateKey, nowMs, parseMs } from '../datetime.js'
 import { randomInt } from '../random.js'
 import { db } from '../db_pg.js'
 import type { DeviceRow } from '../device/device_store.js'
@@ -21,9 +21,9 @@ import {
   getTask,
 } from '../task/task_store.js'
 import {
+  diagnoseNoCandidate,
   findDispatchablePost,
   getPost,
-  markMaterialUsed,
 } from '../post/post_store.js'
 import type { DispatchResult } from '../types.js'
 import { NO_DISPATCH_REASONS } from '../types.js'
@@ -118,18 +118,40 @@ export async function dispatchTo(
   // ── 12-16 + 第 4 条：**一次查询**求出可派发候选 ──
   // ⚠ 原实现是「取 20 个候选帖，再逐个执行 6~9 条检查」—— 单次 claim 最坏约 198 条
   //    串行 SQL。200 台并发领取时会把连接池排空、按串行化放大长尾，心跳跟着排队。
-  //    现在全部约束（帖余量 / 单帖节奏 / 同设备同帖当日 / 素材可用 / 图文配比）
+  //    现在全部约束（帖余量 / 单帖节奏 / 同设备同帖永久一次 / 素材可用 / 图文配比）
   //    下推到一条 SQL，见 post_store.findDispatchablePost。
-  const day = localDayRange()
   const candidate = await findDispatchablePost(
     device.id,
     city,
-    day.start,
-    day.end,
     config.dispatch.unknownOccupiesPostSlot,
   )
   if (!candidate) {
-    log.info(`dispatch reject device=${deviceId} city=${city} stage=candidate reason=no_post_available`)
+    // ⚠ 不再一律回 no_post_available：这个原因码把两种性质完全不同的事混在一起 ——
+    //    「这个省暂时没活」（无需处理）与「帖可派但**选不出素材**」（必须人工补素材）。
+    //    后者若只回一个 no_post_available，运维完全看不出要去补素材。这里做一次归因。
+    const why = await diagnoseNoCandidate(
+      device.id,
+      city,
+      config.dispatch.unknownOccupiesPostSlot,
+    )
+    if (why.blockedByMaterial > 0) {
+      log.warn(
+        `dispatch BLOCKED BY MISSING MATERIAL device=${deviceId} city=${city} ` +
+          `blocked=${why.blockedByMaterial}/${why.postsInCity} —— 这些帖子可派但选不出素材：` +
+          `话术已用尽，或图文帖没有可用图片。请到「帖子池 / 素材」补话术或图片。`,
+      )
+      return { task: null, reason: NO_DISPATCH_REASONS.NO_MATERIAL, retryAfterSeconds: 600 }
+    }
+    if (why.postsInCity > 0) {
+      log.info(
+        `dispatch reject device=${deviceId} city=${city} stage=candidate ` +
+          `reason=no_post_available 候选帖=${why.postsInCity}（均受单帖节奏/配比等约束，稍后重试）`,
+      )
+    } else {
+      log.info(
+        `dispatch reject device=${deviceId} city=${city} stage=candidate reason=no_post_available`,
+      )
+    }
     return { task: null, reason: NO_DISPATCH_REASONS.NO_POST_AVAILABLE, retryAfterSeconds: 300 }
   }
   const commentType: 'text' | 'image' = candidate.need_image ? 'image' : 'text'
@@ -163,6 +185,48 @@ export async function dispatchTo(
     return { task: null, reason: NO_DISPATCH_REASONS.ACCOUNT_DAILY_QUOTA, retryAfterSeconds: 1800 }
   }
 
+  // ── 原子占位：素材（话术 + 图片）──
+  // ⚠ 必须在这里「抢」，不能等建任务之后再 `ON CONFLICT DO NOTHING` 登记。
+  //    `findDispatchablePost` 只是**读**到一句未被占用的话术，而读与登记之间隔着十几次
+  //    await —— 两台设备并发 claim 同一个帖子时会**都读到同一句**，各自建出任务；
+  //    登记时第二台静默失败（DO NOTHING），但话术已经跟着任务发出去了
+  //    → 同一个帖子下面出现两条一模一样的话术，正是这条约束要防的事。
+  //    改用 `INSERT ... ON CONFLICT DO NOTHING RETURNING`：**插入成功才算抢到**，
+  //    与 `posts.committed` 的条件 UPDATE 同一套路。
+  const refs = [`script:${candidate.script_id}`]
+  if (commentType === 'image' && candidate.image_hash) refs.push(`image:${candidate.image_hash}`)
+
+  const claimedRefs: string[] = []
+  /** 回滚本次已占的「帖子名额 / 当日配额 / 素材占位」（任一环节失败时调用） */
+  const rollbackClaims = async (): Promise<void> => {
+    await sql`UPDATE posts SET committed = GREATEST(committed - 1, 0) WHERE id = ${candidate.id}`
+    await sql`UPDATE devices SET daily_done = GREATEST(daily_done - 1, 0) WHERE id = ${device.id}`
+    if (claimedRefs.length > 0) {
+      await sql`
+        DELETE FROM post_material_usage
+        WHERE post_id = ${candidate.id} AND material_ref IN ${sql(claimedRefs)}
+      `
+    }
+  }
+
+  for (const ref of refs) {
+    const got = (await sql`
+      INSERT INTO post_material_usage (post_id, material_ref)
+      VALUES (${candidate.id}, ${ref})
+      ON CONFLICT (post_id, material_ref) DO NOTHING
+      RETURNING material_ref
+    `) as unknown as { material_ref: string }[]
+    if (got.length === 0) {
+      // 素材被并发的另一台设备抢走 → 回滚并让设备稍后重试（下一轮会挑到别的素材）
+      await rollbackClaims()
+      log.info(
+        `dispatch race device=${deviceId} post=${candidate.id} reason=material_taken ref=${ref}`,
+      )
+      return { task: null, reason: NO_DISPATCH_REASONS.NO_MATERIAL, retryAfterSeconds: 15 }
+    }
+    claimedRefs.push(ref)
+  }
+
   // ── 建任务 ──
   let taskId: string
   try {
@@ -179,19 +243,20 @@ export async function dispatchTo(
     taskId = task.id
   } catch (e) {
     // 部分唯一索引 `uq_tasks_device_inflight` 兜住「一台设备两条在途任务」的并发窗口：
-    // 命中唯一冲突说明本设备已经拿到别的任务了 —— 回滚刚占的配额与帖子名额。
-    await sql`UPDATE posts SET committed = GREATEST(committed - 1, 0) WHERE id = ${candidate.id}`
-    await sql`UPDATE devices SET daily_done = GREATEST(daily_done - 1, 0) WHERE id = ${device.id}`
+    // 命中唯一冲突说明本设备已经拿到别的任务了 —— 回滚帖子名额、当日配额与素材占位。
+    await rollbackClaims()
     log.warn(
       `dispatch create-failed device=${deviceId} post=${candidate.id} err=${(e as Error).message} ` +
-        `（已回滚配额与帖子名额）`,
+        `（已回滚帖子名额、当日配额与素材占位）`,
     )
     return { task: null, reason: NO_DISPATCH_REASONS.DEVICE_BUSY, retryAfterSeconds: 60 }
   }
 
-  const refs = [`script:${candidate.script_id}`]
-  if (commentType === 'image' && candidate.image_hash) refs.push(`image:${candidate.image_hash}`)
-  await markMaterialUsed(candidate.id, refs, taskId)
+  // 补登 task_id：任务失败/中止时按 task_id 精确回收素材（见 task_store.finishTask）
+  await sql`
+    UPDATE post_material_usage SET task_id = ${taskId}
+    WHERE post_id = ${candidate.id} AND material_ref IN ${sql(claimedRefs)}
+  `
   await recordDispatch(device.id, city)
 
   const pkg = await toTaskPackage(taskId)

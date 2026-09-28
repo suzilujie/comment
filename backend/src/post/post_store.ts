@@ -106,22 +106,16 @@ export async function pickUnusedImage(
   return rows[0] ?? null
 }
 
-/** 标记素材已用于该帖（幂等） */
-export async function markMaterialUsed(
-  postId: string,
-  refs: string[],
-  taskId?: string,
-): Promise<void> {
-  if (refs.length === 0) return
-  const sql = db()
-  for (const ref of refs) {
-    await sql`
-      INSERT INTO post_material_usage (post_id, material_ref, task_id)
-      VALUES (${postId}, ${ref}, ${taskId ?? null})
-      ON CONFLICT (post_id, material_ref) DO NOTHING
-    `
-  }
-}
+/**
+ * ⚠ 已移除 `markMaterialUsed`。
+ *
+ * 它把「登记素材占用」放在**建任务之后**，且只用 `ON CONFLICT DO NOTHING` 吞掉冲突 ——
+ * 两台设备并发 claim 同一个帖子时会**都选中同一句未被占用的话术**，第二台静默失败，
+ * 但任务已经带着这句话术发出去了 → 同帖出现两条一模一样的话术。
+ *
+ * 现在由 `dispatcher` 用 `INSERT ... ON CONFLICT DO NOTHING RETURNING` **在派发前抢占**
+ * （与 `posts.committed` 同一套路），抢不到就回滚重试。
+ */
 
 /**
  * 决定本次评论形态：图文 1/4 配比。
@@ -165,18 +159,15 @@ export interface DispatchCandidate {
  * 现在把全部约束下推到一条 SQL（全部是 EXISTS / 标量子查询，PostgreSQL 可以走索引）：
  *  · 12/13 帖有余量（用 `committed` 计数，与原子占位同一口径）
  *  · 14   单帖节奏
- *  · 4    同设备 × 同帖当日未评论（口径同 `countDevicePostComments`）
+ *  · 4    同设备 × 同帖**永久**未评论过（不设日期范围，隔天也不允许重复）
  *  · 15   还有未使用的话术；若本次需要配图，还必须有未使用的图片
  *  · 形态 1/4 图文配比（口径同 `decideCommentType`，含 unknown 计占用）
  *
- * @param todayKey 调用方传入的 UTC+8 日期键（保持与 `localDateKey()` 同一口径）
  * @param unknownOccupiesPostSlot 同 `config.dispatch.unknownOccupiesPostSlot`
  */
 export async function findDispatchablePost(
   deviceId: string,
   city: string,
-  dayStart: Date,
-  dayEnd: Date,
   unknownOccupiesPostSlot: boolean,
 ): Promise<DispatchCandidate | null> {
   const sql = db()
@@ -196,12 +187,14 @@ export async function findDispatchablePost(
           p.last_comment_at IS NULL
           OR p.last_comment_at < NOW() - ${`${config.dispatch.perPostMinIntervalMinutes} minutes`}::interval
         )
-        -- 4：同设备 × 同帖当日未评论过（口径同 countDevicePostComments）
+        -- 4：同设备 × 同帖 **永久一次**。
+        --    ⚠ 这里刻意**不加日期范围**：早期实现只限"当日"，导致同一台设备隔天可以
+        --    再评同一个帖子 —— 切省周期是 2 天，设备转回来就会重复评论同一条视频。
+        --    去掉日期条件后正好命中 idx_tasks_device_post (device_id, post_id)，
+        --    比原来的日期区间更快（区间写法用不上这个复合索引）。
         AND NOT EXISTS (
           SELECT 1 FROM tasks t2
           WHERE t2.device_id = ${deviceId} AND t2.post_id = p.id
-            -- 用区间而不是 (col AT TIME ZONE ...)::date = 键：后者非 sargable，索引失效
-            AND t2.dispatched_at >= ${dayStart} AND t2.dispatched_at < ${dayEnd}
             AND (
               t2.status IN ('succeeded', 'dispatched', 'executing')
               OR (${unknownOccupiesPostSlot} AND t2.status = 'unknown')
@@ -244,6 +237,78 @@ export async function findDispatchablePost(
 
   // 需要配图但没有可用图片的候选要跳过（原 checkMaterialAvailable + pickUnusedImage 的语义）
   return rows.find((r) => !r.need_image || r.image_hash !== null) ?? null
+}
+
+/** `diagnoseNoCandidate` 的归因结果 */
+export interface NoCandidateDiagnosis {
+  /** 该城市里「帖有余量、且本设备未评过」的候选帖数 */
+  postsInCity: number
+  /** 其中因**缺素材**而选不出来的帖数（需要人工补素材） */
+  blockedByMaterial: number
+}
+
+/**
+ * 候选为空时的**归因**。
+ *
+ * 为什么需要它：`findDispatchablePost` 返回 null 时，调用方一律回 `no_post_available`，
+ * 但这个原因码混了两种性质完全不同的情况：
+ *   ① 「这个省暂时没活」—— 无需处理，等下一轮；
+ *   ② 「帖可派，但选不出素材」—— **必须人工补素材**，否则该帖永远派不出去。
+ *
+ * ② 的典型形态（早期实现里完全静默）：
+ *   · 图文帖（`post_type='image'`）在前 1/4 条必须是图文，而 `materials` 里没有可用图片
+ *     → `need_image=true` 但 `image_hash=null` → 候选被 `rows.find(...)` 丢弃；
+ *   · 该帖的可用话术已全部用过（被历史失败任务吃掉、或话术库本身不够）
+ *     → `AND EXISTS (...未使用的话术...)` 直接把它排除。
+ *
+ * 这两种只会表现为「怎么一直没有任务」，运维看不出要去补素材 —— 所以这里把它查出来，
+ * 由调用方打 WARN 日志并回一个**专门的原因码**。
+ */
+export async function diagnoseNoCandidate(
+  deviceId: string,
+  city: string,
+  unknownOccupiesPostSlot: boolean,
+): Promise<NoCandidateDiagnosis> {
+  const sql = db()
+  const rows = (await sql`
+    SELECT
+      COUNT(*)::int AS posts_in_city,
+      COUNT(*) FILTER (
+        WHERE
+          -- 话术已用尽
+          NOT EXISTS (
+            SELECT 1 FROM scripts s
+            WHERE s.enabled = TRUE
+              AND NOT EXISTS (SELECT 1 FROM post_material_usage u
+                              WHERE u.post_id = p.id AND u.material_ref = 'script:' || s.id)
+          )
+          -- 或：图文帖却没有可用图片
+          OR (
+            p.post_type = 'image'
+            AND NOT EXISTS (
+              SELECT 1 FROM materials m
+              WHERE m.enabled = TRUE
+                AND NOT EXISTS (SELECT 1 FROM post_material_usage u
+                                WHERE u.post_id = p.id AND u.material_ref = 'image:' || m.hash)
+            )
+          )
+      )::int AS blocked_by_material
+    FROM posts p
+    WHERE p.status = 'active'
+      AND p.city = ${city}
+      AND p.committed < p.target_count
+      AND NOT EXISTS (
+        SELECT 1 FROM tasks t2
+        WHERE t2.device_id = ${deviceId} AND t2.post_id = p.id
+          AND (t2.status IN ('succeeded', 'dispatched', 'executing')
+               OR (${unknownOccupiesPostSlot} AND t2.status = 'unknown'))
+      )
+  `) as unknown as { posts_in_city: number; blocked_by_material: number }[]
+
+  return {
+    postsInCity: rows[0]?.posts_in_city ?? 0,
+    blockedByMaterial: rows[0]?.blocked_by_material ?? 0,
+  }
 }
 
 /** 城市池：当前有帖子可评的城市（active） */

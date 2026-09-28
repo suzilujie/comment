@@ -210,6 +210,22 @@ export async function finishTask(
       UPDATE posts SET committed = GREATEST(committed - 1, 0), updated_at = NOW()
       WHERE id = ${task.post_id}
     `
+    // 同时释放本次占用的**素材**（话术 / 图片）。
+    //
+    // 派单时就把素材登记为"该帖已用"了，而这里如果不回收，一次失败（打不开抖音 /
+    // 属地不符 / 网络异常 —— 评论根本没发出去）也会永久吃掉一句话术。
+    // 后果：`findDispatchablePost` 要求"必须还有未使用的话术"，于是该帖会在
+    // `committed < target_count` 的情况下**静默地再也派不出去**。
+    //
+    // ⚠ `unknown` 同样**不回收**：可能已发出，回收会导致同帖复用同一句话术。
+    const freed = (await sql`
+      DELETE FROM post_material_usage WHERE task_id = ${taskId} RETURNING material_ref
+    `) as unknown as { material_ref: string }[]
+    if (freed.length > 0) {
+      log.info(
+        `task fail ${taskId} → 释放素材 ${freed.map((f) => f.material_ref).join(', ')}（可被同帖重新选用）`,
+      )
+    }
   }
 
   if (task.device_id) {
@@ -249,7 +265,11 @@ export async function countTodayDone(deviceId: string): Promise<number> {
 }
 
 /**
- * 该设备今日是否已评论过该帖（1 次/天）。
+ * 该设备是否已评论过该帖（**永久一次**，不按天重置）。
+ *
+ * ⚠ 早期实现按「当日」计数，于是同一台设备隔天可以再评同一个帖子 ——
+ * 切省周期是 2 天，设备转回来就会重复评论同一条视频。现已与
+ * `findDispatchablePost` 第 4 条口径统一为「一辈子一次」。
  *
  * 口径：
  *  · succeeded / dispatched / executing —— 恒占用（已成功或在途，占用才能防重复派单）；
@@ -263,7 +283,6 @@ export async function countDevicePostComments(
   includeUnknown: boolean,
 ): Promise<number> {
   const sql = db()
-  const { start, end } = localDayRange()
   const rows = (await sql`
     SELECT COUNT(*)::int AS n FROM tasks
     WHERE device_id = ${deviceId} AND post_id = ${postId}
@@ -271,7 +290,6 @@ export async function countDevicePostComments(
         status IN ('succeeded', 'dispatched', 'executing')
         OR (${includeUnknown} AND status = 'unknown')
       )
-      AND dispatched_at >= ${start} AND dispatched_at < ${end}
   `) as unknown as { n: number }[]
   return rows[0]?.n ?? 0
 }

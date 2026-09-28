@@ -92,13 +92,25 @@ export interface AdminPostRow {
   target_count: number
   /** 已占用条数（succeeded + dispatched + executing + unknown） */
   committed: number
-  /** 今天已派发条数（决定「同设备 × 同帖每天一次」是否还占着名额） */
+  /**
+   * 今天已派发条数。
+   * 注意「同设备 × 同帖」的限制是**永久一次**（不再按天重置），
+   * 这个字段现在只用于判断「释放今日名额」按钮是否可用。
+   */
   today_used: number
   last_comment_at: Date | null
   total_tasks: number
   succeeded: number
   unknown: number
   failed: number
+  /**
+   * 当前为什么派不出去（`null` = 可正常派单）。
+   *
+   * 专门暴露「**缺素材**」这一类：帖子本身有余量、也没被同设备评过，但因为
+   * 话术用尽 / 图文帖没有可用图片而永远选不出候选 —— 不显式提示的话，运维只会看到
+   * "怎么一直没有任务"，完全想不到要去补话术或图片。
+   */
+  blocked_reason: string | null
 }
 
 /** 帖子池 + 统计（管理台首屏要看"为什么领不到"） */
@@ -117,7 +129,25 @@ export async function listPostsWithStats(limit = 200): Promise<AdminPostRow[]> {
       (SELECT COUNT(*)::int FROM tasks t WHERE t.post_id = p.id) AS total_tasks,
       (SELECT COUNT(*)::int FROM tasks t WHERE t.post_id = p.id AND t.status = 'succeeded') AS succeeded,
       (SELECT COUNT(*)::int FROM tasks t WHERE t.post_id = p.id AND t.status = 'unknown')   AS unknown,
-      (SELECT COUNT(*)::int FROM tasks t WHERE t.post_id = p.id AND t.status = 'failed')    AS failed
+      (SELECT COUNT(*)::int FROM tasks t WHERE t.post_id = p.id AND t.status = 'failed')    AS failed,
+      -- 「派不出去」的归因：只针对"本该可派"的帖子（active 且仍有余量）
+      CASE
+        WHEN p.status <> 'active' THEN NULL
+        WHEN p.committed >= p.target_count THEN NULL
+        WHEN NOT EXISTS (
+          SELECT 1 FROM scripts s
+          WHERE s.enabled = TRUE
+            AND NOT EXISTS (SELECT 1 FROM post_material_usage u
+                            WHERE u.post_id = p.id AND u.material_ref = 'script:' || s.id)
+        ) THEN '话术已用尽'
+        WHEN p.post_type = 'image' AND NOT EXISTS (
+          SELECT 1 FROM materials m
+          WHERE m.enabled = TRUE
+            AND NOT EXISTS (SELECT 1 FROM post_material_usage u
+                            WHERE u.post_id = p.id AND u.material_ref = 'image:' || m.hash)
+        ) THEN '图文帖缺图片'
+        ELSE NULL
+      END AS blocked_reason
     FROM posts p
     ORDER BY
       CASE p.status WHEN 'active' THEN 0 WHEN 'paused' THEN 1 ELSE 2 END,
