@@ -25,6 +25,7 @@ import {
   deletePost,
   deleteScript,
   getOverview,
+  listAvailableProvinces,
   listCitiesAdmin,
   listCommands,
   listMaterials,
@@ -105,7 +106,14 @@ admin.get('/events', async (c) =>
   c.json({ items: await listTaskEvents(limitOf(c.req.query('limit'), 100)) }),
 )
 
-admin.get('/city-pools', async (c) => c.json({ items: await listCitiesAdmin() }))
+admin.get('/city-pools', async (c) =>
+  c.json({
+    items: await listCitiesAdmin(),
+    // 尚未入池的标准省份名：前端「新增省份」下拉用它，从源头杜绝手输错别字
+    // （池里出现「河北省」这类值，设备上报「河北」将永远匹配不上，且无从归因）
+    availableProvinces: await listAvailableProvinces(),
+  }),
+)
 
 admin.get('/materials', async (c) => c.json({ items: await listMaterials() }))
 
@@ -275,9 +283,10 @@ admin.delete('/scripts/:id', async (c) => {
 
 admin.post('/city-pools', async (c) => {
   const body = (await c.req.json().catch(() => ({}))) as Record<string, unknown>
+  // slug 已改为由省份名推导（见 admin_store.PROVINCE_SLUGS），不再从请求体接收 ——
+  // 人工拼 slug 只会引入「同名不同 slug」和拼错前缀的脏数据，而它对切省毫无作用。
   const r = await createCity(
     typeof body.city === 'string' ? body.city : '',
-    typeof body.slug === 'string' ? body.slug : '',
     typeof body.remark === 'string' ? body.remark : undefined,
   )
   return c.json(r, r.ok ? 200 : 400)

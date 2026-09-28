@@ -565,26 +565,102 @@ export async function listCitiesAdmin(): Promise<AdminCityRow[]> {
   `) as unknown as AdminCityRow[]
 }
 
-export async function createCity(city: string, slug: string, remark?: string): Promise<OpResult> {
+/**
+ * 省级行政区 → 规范 slug（与 `sql/migrate_to_region.sql` 的 prov_map 保持一致）。
+ *
+ * 为什么需要这张表，而不是让调用方随便传 slug：
+ *  1. **防错别字**。省份池是「精确匹配」的另一半 —— 池里写「河北省」，设备上报「河北」
+ *     永远匹配不上，而症状只是"设备一直空转/领不到任务"，几乎无法归因（与设备端
+ *     `RegionName` 的严格口径同源：宁可不加，也不带病加）。
+ *  2. slug 必须**唯一**（`uq_city_pools_slug`）且**稳定**：由省份名推导，就不会出现
+ *     同名不同 slug、或人工拼错前缀导致风格分裂。
+ *
+ * 注：当前 slug **不参与切省** —— 切省用的是固定组 `city-pool`，省份靠**节点名**表达
+ * （见设备端 `Config.CLASH_CITY_GROUP` 与 `CityRotator`）。留着它是为「每省一个 select 组」
+ * 的备选方案预留，因此格式仍按 `province-xxx` 统一。
+ */
+const PROVINCE_SLUGS: Record<string, string> = {
+  // ── 直辖市 ──
+  北京: 'province-beijing',
+  天津: 'province-tianjin',
+  上海: 'province-shanghai',
+  重庆: 'province-chongqing',
+  // ── 省 ──
+  河北: 'province-hebei',
+  山西: 'province-shanxi',
+  辽宁: 'province-liaoning',
+  吉林: 'province-jilin',
+  黑龙江: 'province-heilongjiang',
+  江苏: 'province-jiangsu',
+  浙江: 'province-zhejiang',
+  安徽: 'province-anhui',
+  福建: 'province-fujian',
+  江西: 'province-jiangxi',
+  山东: 'province-shandong',
+  河南: 'province-henan',
+  湖北: 'province-hubei',
+  湖南: 'province-hunan',
+  广东: 'province-guangdong',
+  海南: 'province-hainan',
+  四川: 'province-sichuan',
+  贵州: 'province-guizhou',
+  云南: 'province-yunnan',
+  陕西: 'province-shaanxi',
+  甘肃: 'province-gansu',
+  青海: 'province-qinghai',
+  // ── 自治区 ──
+  内蒙古: 'province-neimenggu',
+  广西: 'province-guangxi',
+  西藏: 'province-xizang',
+  宁夏: 'province-ningxia',
+  新疆: 'province-xinjiang',
+  // ── 特别行政区 ──
+  香港: 'province-hongkong',
+  澳门: 'province-macau',
+  台湾: 'province-taiwan',
+  // ── 境外节点（代理可能落在上面）──
+  新加坡: 'province-singapore',
+}
+
+/** 标准省份名（供「新增省份」下拉使用，从源头杜绝错别字） */
+export function standardProvinces(): string[] {
+  return Object.keys(PROVINCE_SLUGS)
+}
+
+/** 尚未入池的标准省份名 */
+export async function listAvailableProvinces(): Promise<string[]> {
+  const sql = db()
+  const rows = (await sql`SELECT city FROM city_pools`) as unknown as { city: string }[]
+  const used = new Set(rows.map((r) => r.city))
+  return standardProvinces().filter((c) => !used.has(c))
+}
+
+export async function createCity(city: string, remark?: string): Promise<OpResult> {
   const sql = db()
   const c = (city ?? '').trim()
-  const s = (slug ?? '').trim()
-  if (!c || !s) return { ok: false, error: 'city 与 slug 都不能为空' }
-  // slug 是 Clash 里的 group 名，格式统一成 province-xxx
-  const normalized = s.startsWith('province-') ? s : `province-${s}`
+  // slug 由省份名推导 —— 不再接受调用方传入（见 PROVINCE_SLUGS 的说明）
+  const slug = PROVINCE_SLUGS[c]
+  if (!slug) {
+    return {
+      ok: false,
+      error:
+        `「${c}」不是标准省份名。属地是精确匹配条件，为避免错别字入池，只接受规范写法。` +
+        `请在列表中选择（共 ${standardProvinces().length} 个）。`,
+    }
+  }
   try {
     await sql`
       INSERT INTO city_pools (city, slug, active, post_count, remark)
-      VALUES (${c}, ${normalized}, TRUE, 0, ${remark ?? null})
+      VALUES (${c}, ${slug}, TRUE, 0, ${remark ?? null})
     `
   } catch (e) {
     const msg = (e as Error).message
     if (msg.includes('city_pools_pkey')) return { ok: false, error: `省份已存在：${c}` }
-    if (msg.includes('uq_city_pools_slug')) return { ok: false, error: `slug 已存在：${normalized}` }
+    if (msg.includes('uq_city_pools_slug')) return { ok: false, error: `slug 已存在：${slug}` }
     return { ok: false, error: msg }
   }
-  log.info(`admin create-city city=${c} slug=${normalized}`)
-  return { ok: true, detail: { city: c, slug: normalized } }
+  log.info(`admin create-city city=${c} slug=${slug}`)
+  return { ok: true, detail: { city: c, slug } }
 }
 
 export async function updateCity(city: string, active: boolean): Promise<OpResult> {

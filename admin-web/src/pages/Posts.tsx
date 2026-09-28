@@ -45,6 +45,10 @@ export default function Posts({ autoMs, refreshKey, notify }: Props) {
   const cities = useFetch(() => api.cities(), [refreshKey])
   const [form, setForm] = useState<FormState | null>(null)
   const [saving, setSaving] = useState(false)
+  /** 表单内联「新增省份」的状态（见 addCity） */
+  const [newCityOpen, setNewCityOpen] = useState(false)
+  const [newCity, setNewCity] = useState('')
+  const [addingCity, setAddingCity] = useState(false)
 
   /**
    * 省份下拉选项：池中省份 +（编辑时）该帖当前值。
@@ -62,6 +66,39 @@ export default function Posts({ autoMs, refreshKey, notify }: Props) {
       opts.unshift({ value: cur, label: `${cur}（不在省份池中）` })
     }
     return opts
+  }
+
+  /** 尚未入池的标准省份名（后台下发），用于表单内联新增 */
+  const availableProvinces = cities.data?.availableProvinces ?? []
+
+  /**
+   * 内联新增省份 —— 省得为了加一个省在「帖子池 / 省份池」两个页签之间来回跳。
+   *
+   * 下拉只列**标准省名**（后台 `PROVINCE_SLUGS`），所以不会有错别字：池里一旦出现
+   * 「河北省」，该省帖子就永远匹配不上设备上报的「河北」，而症状只是"怎么一直没任务"，
+   * 几乎无法归因。slug 也由后台按省名推导，不需要人工填写。
+   */
+  const addCity = async () => {
+    const name = newCity.trim()
+    if (!name) return
+    setAddingCity(true)
+    try {
+      const r = await api.createCity(name)
+      if (!r.ok) {
+        notify(`新增省份失败：${r.error}`, 'err')
+        return
+      }
+      cities.reload()
+      // 立刻选中：即便池子还没刷新回来，cityOptions() 也会把当前值兜底列为候选项
+      setForm((f) => (f ? { ...f, city: name } : f))
+      setNewCityOpen(false)
+      setNewCity('')
+      notify(`已新增省份「${name}」并选中`, 'ok')
+    } catch (e) {
+      notify(`新增省份失败：${e instanceof Error ? e.message : String(e)}`, 'err')
+    } finally {
+      setAddingCity(false)
+    }
   }
 
   const release = async (postId: string, city: string) => {
@@ -186,11 +223,52 @@ export default function Posts({ autoMs, refreshKey, notify }: Props) {
                   </option>
                 ))}
               </select>
-              <div className="mt-1 text-[10px] text-slate-600">
-                {cities.data && cities.data.items.length === 0
-                  ? '⚠ 省份池为空 —— 请先到「省份池」页添加省份，否则帖子永远派不出去'
-                  : '选自「省份池」；需要新省份请先到该页添加（属地是精确匹配，不匹配不会被派单）'}
-              </div>
+              {/* 内联新增省份：省得为了加一个省在「帖子池 / 省份池」之间来回跳 */}
+              {newCityOpen ? (
+                <div className="mt-1.5 flex gap-1">
+                  <select
+                    value={newCity}
+                    onChange={(e) => setNewCity(e.target.value)}
+                    className={inputCls}
+                  >
+                    <option value="">选择要新增的省份…</option>
+                    {availableProvinces.map((p) => (
+                      <option key={p} value={p}>
+                        {p}
+                      </option>
+                    ))}
+                  </select>
+                  <Btn small onClick={() => void addCity()} disabled={addingCity || !newCity}>
+                    {addingCity ? '加入中…' : '加入'}
+                  </Btn>
+                  <Btn
+                    small
+                    tone="ghost"
+                    onClick={() => {
+                      setNewCityOpen(false)
+                      setNewCity('')
+                    }}
+                    disabled={addingCity}
+                  >
+                    取消
+                  </Btn>
+                </div>
+              ) : (
+                <div className="mt-1 flex items-center justify-between gap-2">
+                  <span className="text-[10px] text-slate-600">
+                    选自「省份池」；属地是精确匹配，不匹配不会被派单
+                  </span>
+                  {availableProvinces.length > 0 && (
+                    <button
+                      type="button"
+                      onClick={() => setNewCityOpen(true)}
+                      className="shrink-0 text-[10px] text-sky-400 hover:text-sky-300"
+                    >
+                      ＋ 新增省份
+                    </button>
+                  )}
+                </div>
+              )}
             </div>
             <div>
               <div className="mb-1 text-[11px] text-slate-500">形态</div>

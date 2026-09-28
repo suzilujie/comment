@@ -360,10 +360,15 @@ export const api = {
 
   // ── 省份池（接口路径仍是 /city-pools，属既有契约，不改）──────
 
-  cities: () => req<{ items: CityItem[] }>('/city-pools'),
+  /**
+   * `availableProvinces` = 尚未入池的**标准**省份名。
+   * 用它做下拉，避免手输错别字（池里出现「河北省」会让该省的帖子永远派不出去）。
+   */
+  cities: () => req<{ items: CityItem[]; availableProvinces: string[] }>('/city-pools'),
 
-  createCity: (city: string, slug: string) =>
-    req<OpResult>('/city-pools', { method: 'POST', body: JSON.stringify({ city, slug }) }),
+  /** slug 由后端按省份名推导（PROVINCE_SLUGS），前端不再传 */
+  createCity: (city: string) =>
+    req<OpResult>('/city-pools', { method: 'POST', body: JSON.stringify({ city }) }),
 
   updateCity: (city: string, active: boolean) =>
     req<OpResult>(`/city-pools/${encodeURIComponent(city)}`, {
