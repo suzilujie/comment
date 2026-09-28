@@ -2,6 +2,7 @@ package com.xfish.comment.agent.accessibility
 
 import android.view.accessibility.AccessibilityNodeInfo
 import com.xfish.comment.agent.core.Log
+import com.xfish.comment.agent.core.Time
 import kotlinx.coroutines.delay
 
 /**
@@ -13,10 +14,31 @@ import kotlinx.coroutines.delay
  *
  * 注意：**抖音是第三方 App，viewId 通常不可读**（非 debuggable），
  * 所以主力是 text / contentDescription，viewId 命中属额外收益。
+ *
+ * ## 性能约定（2026-09-28 改造）
+ *
+ * **一次遍历抓快照，之后全在内存里匹配**。
+ *
+ * 早期实现是「定位链上每个候选串各遍历一次全树」：`commentInputEntry` 有
+ * 9 个 textContains + 4 个 descContains + className ≈ **14 次全树 IPC**；叠加
+ * `waitFor` 的 250ms 轮询后，单次等待最坏可达**数百次整树扫描** ——
+ * 真机表现为「找评论输入框固定白等 5 秒，最后靠 `editableField` 兜底才命中」。
+ *
+ * 现在遍历只发生一次，IPC 次数从 `O(候选串数)` 降到 `O(1)`。
+ * 之所以能这样，是因为 `text` / `contentDescription` / `className` / `isClickable`
+ * 都是 [AccessibilityNodeInfo] 对象上的**本地字段**（取节点时已一并带回），
+ * 读取不产生 IPC；**只有 `getChild` / `parent` 需要跨进程调用**。
  */
 object NodeFinder {
 
     private const val TAG = "finder"
+
+    /**
+     * 单次遍历的节点数上限。
+     * 长评论列表可达上千节点，超过此值即停止 —— 目的是把最坏耗时钉死在可控范围，
+     * 宁可漏掉极深处的节点，也不让一次定位拖垮整个任务。
+     */
+    private const val DEFAULT_MAX_NODES = 600
 
     /** 定位条件（按优先级依次尝试） */
     data class Locator(
@@ -32,6 +54,20 @@ object NodeFinder {
         val maxDepth: Int = 30,
     )
 
+    /**
+     * 节点特征快照。
+     *
+     * 所有字段都在**遍历时一次性读出**（均为节点本地字段，无额外 IPC），
+     * 之后定位链的每一级都在这份 List 上做内存匹配。
+     */
+    private class NodeSnapshot(
+        val node: AccessibilityNodeInfo,
+        val text: String,
+        val desc: String,
+        val className: String?,
+        val clickable: Boolean,
+    )
+
     // ── 查询 ─────────────────────────────────────────────────
 
     /** 在当前窗口按定位链查找第一个命中节点 */
@@ -41,19 +77,9 @@ object NodeFinder {
     }
 
     fun findIn(root: AccessibilityNodeInfo, locator: Locator): AccessibilityNodeInfo? {
-        // 1) 精确文本
-        locator.textExact.forEach { t -> findByText(root, t, exact = true, locator)?.let { return it } }
-        // 2) 包含文本
-        locator.textContains.forEach { t -> findByText(root, t, exact = false, locator)?.let { return it } }
-        // 3) 正则文本
-        locator.textRegex?.let { re -> findByRegex(root, re, locator)?.let { return it } }
-        // 4) contentDescription
-        locator.descContains.forEach { d -> findByDesc(root, d, locator)?.let { return it } }
-        // 5) viewId（若可读）
-        locator.viewIds.forEach { id -> findByViewId(root, id, locator)?.let { return it } }
-        // 6) 类名兜底
-        locator.className?.let { c -> findByClass(root, c, locator)?.let { return it } }
-        return null
+        val nodes = snapshot(root, locator.maxDepth)
+        if (nodes.isEmpty()) return null
+        return matchIn(root, nodes, locator)
     }
 
     /** 找到所有命中文本的节点（用于「浏览评论」「统计条目」等场景） */
@@ -73,11 +99,12 @@ object NodeFinder {
 
     /**
      * 等待节点出现（轮询；抖音页面有渲染延迟，直接点会点空）。
+     * 按**单调时钟**计时：改系统时间不会让超时乱跳（项目约定 §4.4）。
      * @return 命中节点或 null（超时）
      */
     suspend fun waitFor(locator: Locator, timeoutMs: Long = 6_000, intervalMs: Long = 250): AccessibilityNodeInfo? {
-        val deadline = System.currentTimeMillis() + timeoutMs
-        while (System.currentTimeMillis() < deadline) {
+        val deadline = Time.elapsedMs() + timeoutMs
+        while (Time.elapsedMs() < deadline) {
             find(locator)?.let { return it }
             delay(intervalMs)
         }
@@ -85,10 +112,10 @@ object NodeFinder {
         return null
     }
 
-    /** 等待某段文本出现（用于提交后校验、弹窗识别） */
+    /** 等待某段文本出现（用于提交后校验、弹窗识别）；同样按单调时钟计时 */
     suspend fun waitForTextContains(keyword: String, timeoutMs: Long = 8_000, intervalMs: Long = 300): Boolean {
-        val deadline = System.currentTimeMillis() + timeoutMs
-        while (System.currentTimeMillis() < deadline) {
+        val deadline = Time.elapsedMs() + timeoutMs
+        while (Time.elapsedMs() < deadline) {
             if (containsText(keyword)) return true
             delay(intervalMs)
         }
@@ -105,7 +132,7 @@ object NodeFinder {
      * 多关键词联合判定（风控/限流/验证码共 15+ 个关键词）若逐词遍历，
      * 会退化成 N 次全树扫描（实测可拖到数十秒）。统一改为「抓一次、内存里匹配」。
      */
-    fun snapshotTexts(maxNodes: Int = 600): List<String> {
+    fun snapshotTexts(maxNodes: Int = DEFAULT_MAX_NODES): List<String> {
         val root = AutoService.root() ?: return emptyList()
         val out = ArrayList<String>()
         walk(root, 0, 30) { node ->
@@ -136,82 +163,73 @@ object NodeFinder {
         return null
     }
 
-    // ── 遍历实现 ─────────────────────────────────────────────
+    // ── 实现 ─────────────────────────────────────────────────
 
-    private fun findByText(
-        root: AccessibilityNodeInfo,
-        text: String,
-        exact: Boolean,
-        locator: Locator,
-    ): AccessibilityNodeInfo? {
-        var hit: AccessibilityNodeInfo? = null
-        walk(root, 0, locator.maxDepth) { node ->
-            val t = node.text?.toString().orEmpty()
-            val ok = if (exact) t == text else t.contains(text)
-            if (ok && (!locator.clickableOnly || node.isClickable || clickableAncestor(node) != null)) {
-                hit = node
-                false
-            } else true
+    /** 一次遍历抓取全部节点特征（本文件唯一的「大」IPC 开销来源） */
+    private fun snapshot(root: AccessibilityNodeInfo, maxDepth: Int): List<NodeSnapshot> {
+        val out = ArrayList<NodeSnapshot>(256)
+        walk(root, 0, maxDepth) { node ->
+            out.add(
+                NodeSnapshot(
+                    node = node,
+                    text = node.text?.toString().orEmpty(),
+                    desc = node.contentDescription?.toString().orEmpty(),
+                    className = node.className?.toString(),
+                    clickable = node.isClickable,
+                ),
+            )
+            out.size < DEFAULT_MAX_NODES
         }
-        return hit
+        return out
     }
 
-    private fun findByRegex(
+    /**
+     * 在快照上按优先级链匹配（纯内存运算，无 IPC）。
+     *
+     * 各级的判定语义与原实现**逐条保持一致**（尤其 clickableOnly 的适用范围）：
+     *  · textExact / textContains：命中节点需满足 clickableOnly（否则向上找可点祖先，但返回原节点）
+     *  · textRegex / descContains：原实现**不校验** clickableOnly，此处保持一致
+     *  · className：原实现要求节点自身 clickable，且**不受** clickableOnly 影响
+     */
+    private fun matchIn(
         root: AccessibilityNodeInfo,
-        re: Regex,
+        nodes: List<NodeSnapshot>,
         locator: Locator,
     ): AccessibilityNodeInfo? {
-        var hit: AccessibilityNodeInfo? = null
-        walk(root, 0, locator.maxDepth) { node ->
-            val t = node.text?.toString().orEmpty()
-            if (t.isNotBlank() && re.containsMatchIn(t)) {
-                hit = node
-                false
-            } else true
+        // 1) 精确文本
+        locator.textExact.forEach { t ->
+            nodes.firstOrNull { it.text == t && clickableOk(it, locator) }?.let { return it.node }
         }
-        return hit
-    }
-
-    private fun findByDesc(
-        root: AccessibilityNodeInfo,
-        desc: String,
-        locator: Locator,
-    ): AccessibilityNodeInfo? {
-        var hit: AccessibilityNodeInfo? = null
-        walk(root, 0, locator.maxDepth) { node ->
-            val d = node.contentDescription?.toString().orEmpty()
-            if (d.contains(desc)) {
-                hit = node
-                false
-            } else true
+        // 2) 包含文本
+        locator.textContains.forEach { t ->
+            nodes.firstOrNull { it.text.contains(t) && clickableOk(it, locator) }?.let { return it.node }
         }
-        return hit
-    }
-
-    private fun findByViewId(
-        root: AccessibilityNodeInfo,
-        id: String,
-        locator: Locator,
-    ): AccessibilityNodeInfo? {
-        val list = runCatching { root.findAccessibilityNodeInfosByViewId(id) }.getOrNull()
-        val first = list?.firstOrNull() ?: return null
-        return if (!locator.clickableOnly || first.isClickable) first else clickableAncestor(first)
-    }
-
-    private fun findByClass(
-        root: AccessibilityNodeInfo,
-        className: String,
-        locator: Locator,
-    ): AccessibilityNodeInfo? {
-        var hit: AccessibilityNodeInfo? = null
-        walk(root, 0, locator.maxDepth) { node ->
-            if (node.className?.toString() == className && node.isClickable) {
-                hit = node
-                false
-            } else true
+        // 3) 正则文本
+        locator.textRegex?.let { re ->
+            nodes.firstOrNull { it.text.isNotBlank() && re.containsMatchIn(it.text) }?.let { return it.node }
         }
-        return hit
+        // 4) contentDescription
+        locator.descContains.forEach { d ->
+            nodes.firstOrNull { it.desc.contains(d) }?.let { return it.node }
+        }
+        // 5) viewId：仍走官方 API —— 它是**单次** IPC，且能命中 viewIdResourceName 读不到的节点
+        locator.viewIds.forEach { id ->
+            val first = runCatching { root.findAccessibilityNodeInfosByViewId(id) }.getOrNull()?.firstOrNull()
+            if (first != null) {
+                val hit = if (!locator.clickableOnly || first.isClickable) first else clickableAncestor(first)
+                if (hit != null) return hit
+            }
+        }
+        // 6) 类名兜底
+        locator.className?.let { c ->
+            nodes.firstOrNull { it.className == c && it.clickable }?.let { return it.node }
+        }
+        return null
     }
+
+    /** clickableOnly 判定：命中节点本身可点，或其祖先可点（与原实现一致） */
+    private fun clickableOk(s: NodeSnapshot, locator: Locator): Boolean =
+        !locator.clickableOnly || s.clickable || clickableAncestor(s.node) != null
 
     /**
      * 深度优先遍历；回调返回 false 表示提前终止。
@@ -221,14 +239,14 @@ object NodeFinder {
         root: AccessibilityNodeInfo,
         startDepth: Int,
         maxDepth: Int,
+        maxNodes: Int = DEFAULT_MAX_NODES,
         onNode: (AccessibilityNodeInfo) -> Boolean,
     ) {
         var visited = 0
-        val maxVisited = 600
 
         fun dfs(node: AccessibilityNodeInfo, depth: Int): Boolean {
             if (depth > maxDepth) return true
-            if (++visited > maxVisited) return true
+            if (++visited > maxNodes) return true
             if (!onNode(node)) return false
             for (i in 0 until node.childCount) {
                 val child = node.getChild(i) ?: continue

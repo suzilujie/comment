@@ -74,9 +74,11 @@ object TaskExecutor {
 
         try {
             // ── 步骤 0：幂等校验（已执行过的任务不再执行）──
+            // ⚠ UNKNOWN 必须一并拦截：它的语义是「可能已发出、禁止自动重试」。
+            // 若后台对未收到回执的任务重派同 taskId，本地不拦就会重跑 → 重复评论。
             val existing = dao.find(task.taskId)
             if (existing != null && existing.state in setOf(
-                    LocalState.RUNNING, LocalState.SUCCESS, LocalState.REPORTED,
+                    LocalState.RUNNING, LocalState.SUCCESS, LocalState.REPORTED, LocalState.UNKNOWN,
                 )
             ) {
                 Log.w(TAG, "任务 ${task.taskId} 已处理过（${existing.state}），跳过")
@@ -156,23 +158,25 @@ object TaskExecutor {
             }
 
             // ── 步骤 5：唤起抖音 + 短链直达帖子 ──
-            val t5 = Time.nowMs()
+            // 计时统一用**单调时钟**（项目约定 §4.4）：nowMs() 会被后台校时影响，
+            // 校准瞬间可能让「已等 10 秒」这类判定凭空跳变。
+            val t5 = Time.elapsedMs()
             if (!Actions.launchDouyin(context)) {
                 return finish(Outcome("failed", Config.Reason.DOUYIN_NOT_LAUNCHED, "launch_failed", startedAt = startedAt), task, reporter)
             }
             riskOrNull()?.let { return finish(it.copy(startedAt = startedAt), task, reporter) }
-            Log.i(TAG, "步骤5-a 唤起抖音完成：耗时=${Time.nowMs() - t5}ms 页面=${AutoService.currentPage()}")
+            Log.i(TAG, "步骤5-a 唤起抖音完成：耗时=${Time.elapsedMs() - t5}ms 页面=${AutoService.currentPage()}")
 
             if (!Actions.openShortLink(context, task.postUrl)) {
                 return finish(Outcome("failed", Config.Reason.DOUYIN_NOT_LAUNCHED, "short_link_failed", startedAt = startedAt), task, reporter)
             }
             // 等抖音进入前台：AppLinkHandler 需先解析短链（实测约 2.5s）再跳转，等待给足。
             // 按真实时间计时——探测在冷启动期可能阻塞，累加 delay 会把超时悄悄拉长。
-            val fgStart = Time.nowMs()
-            while (Time.nowMs() - fgStart < 10_000 && !AutoService.douyinForeground()) {
+            val fgStart = Time.elapsedMs()
+            while (Time.elapsedMs() - fgStart < 10_000 && !AutoService.douyinForeground()) {
                 delay(500)
             }
-            val waitedMs = Time.nowMs() - fgStart
+            val waitedMs = Time.elapsedMs() - fgStart
             riskOrNull()?.let { return finish(it.copy(startedAt = startedAt), task, reporter) }
 
             if (!AutoService.douyinForeground()) {
@@ -186,13 +190,13 @@ object TaskExecutor {
             Log.i(TAG, "步骤5-b 短链已进入抖音：等待=${waitedMs}ms 页面=${AutoService.currentPage()}")
 
             // 确认我们确实在帖子页（能读到评论入口）—— 这是「有没有进入目标视频」的唯一判据
-            val tPost = Time.nowMs()
+            val tPost = Time.elapsedMs()
             val onPost = NodeFinder.waitFor(DouyinLocators.commentEntry, timeoutMs = 8_000) != null
             if (!onPost) {
                 Log.w(
                     TAG,
                     "未进入目标视频页（找不到评论入口）：帖子=${task.postId} " +
-                        "页面=${AutoService.currentPage()} 探测耗时=${Time.nowMs() - tPost}ms",
+                        "页面=${AutoService.currentPage()} 探测耗时=${Time.elapsedMs() - tPost}ms",
                 )
                 return finish(Outcome("failed", Config.Reason.POST_MISMATCH, "comment_entry_not_found", startedAt = startedAt), task, reporter)
             }
@@ -200,7 +204,7 @@ object TaskExecutor {
                 TAG,
                 "✅ 已进入目标视频页：帖子=${task.postId} url=${task.postUrl} " +
                     "页面=${AutoService.currentPage()} " +
-                    "短链直达总耗时=${Time.nowMs() - t5}ms 入口确认耗时=${Time.nowMs() - tPost}ms",
+                    "短链直达总耗时=${Time.elapsedMs() - t5}ms 入口确认耗时=${Time.elapsedMs() - tPost}ms",
             )
 
             // ── 步骤 6：浏览停留 + 随机滑动（行为仿真）──
@@ -307,9 +311,11 @@ object TaskExecutor {
 
             // ── 步骤 11：校验（决定 succeeded / failed / unknown）──
             delay(Rnd.long(1_200, 2_000))
-            riskOrNull()?.let { return finish(it.copy(startedAt = startedAt), task, reporter) }
+            // ⚠ 这里已经点过发送，评论**可能已发出**：风控信号必须归 unknown，绝不能报 aborted。
+            // 后台把 aborted 当「确认未发出」→ 退还当日配额并可能重新派单 → 同帖评论两次。
+            riskOrNull()?.let { return finish(it.asUnknownAfterSubmit(startedAt), task, reporter) }
 
-            val tVerify = Time.nowMs()
+            val tVerify = Time.elapsedMs()
             // 真机实测（2026-09-26 / Redmi K30 / 抖音 39.7.0）：发送成功后评论其实已发出，
             // 校验却读不到 → 误判 not_visible_but_input_empty（unknown）。两个原因：
             //   ① 发送后评论面板可能被收起，评论列表不在无障碍树里（dump 里只有标题与输入框）；
@@ -320,7 +326,8 @@ object TaskExecutor {
             var countAfter: Int? = null
             for (round in 0..2) {
                 if (round > 0) {
-                    riskOrNull()?.let { return finish(it.copy(startedAt = startedAt), task, reporter) }
+                    // 同上：此刻已提交，风控只能归 unknown（禁止自动重试）
+                    riskOrNull()?.let { return finish(it.asUnknownAfterSubmit(startedAt), task, reporter) }
                     // 面板收起时先重新展开（展开态下点 commentEntry 会命中「缩小评论区」，故先判）
                     if (NodeFinder.find(DouyinLocators.commentInputEntry) == null) {
                         NodeFinder.find(DouyinLocators.commentEntry)?.let { Actions.click(it) }
@@ -351,7 +358,7 @@ object TaskExecutor {
                 TAG,
                 "步骤11 校验：评论可见=$visible 输入框仍含话术=$inputStillHasText " +
                     "评论数=$commentCountBefore->$countAfter " +
-                    "signature=$signature 耗时=${Time.nowMs() - tVerify}ms 页面=${AutoService.currentPage()}",
+                    "signature=$signature 耗时=${Time.elapsedMs() - tVerify}ms 页面=${AutoService.currentPage()}",
             )
             if (!visible && !countGrew) {
                 // failed / unknown 的关键现场：是否弹风控、是否进了审核、是否列表未刷新
@@ -428,6 +435,22 @@ object TaskExecutor {
     }
 
     /**
+     * **已点击发送之后**出现的风控信号 → 一律改判 `unknown`。
+     *
+     * 此时评论可能已经进入平台，但本机无法确认；而 `aborted` 的语义是
+     * 「确认未发出、可退配额、可重派」。若沿用 aborted，后台会退还当日配额
+     * 并可能重新派单，导致同一帖子被评论两次。
+     */
+    private fun Outcome.asUnknownAfterSubmit(startedAt: Long): Outcome = copy(
+        status = "unknown",
+        reasonCode = Config.Reason.VERIFY_FAILED,
+        // 带上 post_submit_ 前缀，日志里一眼可辨「这是提交之后才出现的风控」
+        evidence = "post_submit_${evidence ?: "risk"}",
+        startedAt = startedAt,
+        finishedAt = Time.nowMs(),
+    )
+
+    /**
      * 收尾：模拟真人"发完评论之后"的行为，并最终离开抖音。
      *
      * 为什么随机化（2026-09-26 真机结论）：
@@ -446,6 +469,14 @@ object TaskExecutor {
      * 若用户已手动切到别的 App，则不做任何多余动作（不打扰）。
      */
     private suspend fun exitGracefully(context: Context) {
+        // ⚠ 本函数在 finally 中**无条件**调用，而 ip_mismatch / duplicate_task / image_missing
+        // 这类返回根本没进过抖音。若不判前台就滑动、按返回键，会直接作用在**用户正在使用的
+        // 其它 App** 上（可能退掉他正在编辑的内容）—— 注释承诺的"不打扰"必须真的做到。
+        if (!AutoService.douyinForeground()) {
+            Log.d(TAG, "收尾跳过：当前不在抖音前台（避免打扰用户）")
+            return
+        }
+
         // ① 概率性"再看两条"
         if (Rnd.bool(0.4)) {
             val extra = Rnd.int(1, 3)

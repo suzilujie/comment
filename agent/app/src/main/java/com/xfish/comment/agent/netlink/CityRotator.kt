@@ -264,10 +264,16 @@ object CityRotator {
             }
 
             // ── 成功：落盘 + 立即上报（不等下次心跳）──
+            // ⚠ 上报/落盘必须与心跳同口径（**中文省名**）：后台收到 ip_switched 会直接
+            // `UPDATE devices SET last_ip_city = <上报值>`，若这里传原始英文（如 Hebei），
+            // 设备属地会被覆盖成英文 → 派单 `WHERE p.city = 'Hebei'` 匹配不上中文省名的帖子，
+            // 表现为「切城成功后反而领不到任务」（要等下一次心跳才纠正）。
+            val region = RegionName.normalize(probe.region)
+            // 当前省份仍存后台城市池里的原名（target.city），保证「排除当前省」的精确比较成立
             Prefs.setCurrentCitySlug(context, target.city)
             Prefs.markIpSwitched(context, Time.nowMs())
-            Prefs.saveIp(context, probe.ip, probe.region)
-            reportEvent(null, "ip_switched", null, probe.ip, probe.region)
+            Prefs.saveIp(context, probe.ip, region)
+            reportEvent(null, "ip_switched", null, probe.ip, region)
 
             lastSwitchElapsedMs = Time.elapsedMs()
             val nextAtMs = Time.nowMs() + periodMs()

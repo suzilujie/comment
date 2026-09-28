@@ -15,6 +15,7 @@ import android.view.accessibility.AccessibilityNodeInfo
 import com.xfish.comment.agent.core.Config
 import com.xfish.comment.agent.core.Log
 import com.xfish.comment.agent.core.Rnd
+import com.xfish.comment.agent.core.Time
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlin.coroutines.resume
@@ -249,8 +250,9 @@ object Actions {
      * 早期用「累加 delay」计时会让 8 秒超时实际拉长到 60+ 秒。
      */
     private suspend fun waitDouyinForeground(timeoutMs: Long): Boolean {
-        val deadline = System.currentTimeMillis() + timeoutMs
-        while (System.currentTimeMillis() < deadline) {
+        // 单调时钟：用户改系统时间/时区不会让这个超时失效（项目约定 §4.4）
+        val deadline = Time.elapsedMs() + timeoutMs
+        while (Time.elapsedMs() < deadline) {
             if (AutoService.douyinForeground()) return true
             delay(300)
         }
