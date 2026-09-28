@@ -10,14 +10,14 @@
  */
 import { config } from '../config.js'
 import { createLogger } from '../logger.js'
-import { addMinutes, localDateKey, nowMs, parseMs } from '../datetime.js'
+import { addMinutes, localDateKey, localDayRange, nowMs, parseMs } from '../datetime.js'
 import { randomInt } from '../random.js'
 import { db } from '../db_pg.js'
+import type { DeviceRow } from '../device/device_store.js'
 import { getDevice } from '../device/device_store.js'
 import {
   createTask,
   findInFlightByDevice,
-  countTodayDone,
   getTask,
 } from '../task/task_store.js'
 import {
@@ -104,10 +104,12 @@ export async function dispatchTo(deviceId: string): Promise<DispatchOutcome> {
   //    串行 SQL。200 台并发领取时会把连接池排空、按串行化放大长尾，心跳跟着排队。
   //    现在全部约束（帖余量 / 单帖节奏 / 同设备同帖当日 / 素材可用 / 图文配比）
   //    下推到一条 SQL，见 post_store.findDispatchablePost。
+  const day = localDayRange()
   const candidate = await findDispatchablePost(
     device.id,
     city,
-    localDateKey(),
+    day.start,
+    day.end,
     config.dispatch.unknownOccupiesPostSlot,
   )
   if (!candidate) {
@@ -222,14 +224,25 @@ export async function toTaskPackage(taskId: string): Promise<TaskPackage | null>
   }
 }
 
-/** 该设备当前是否"可以接单"（仅用于心跳里的提示，不做最终裁决） */
-export async function eligibleForTask(deviceId: string | null): Promise<boolean> {
-  if (!deviceId) return false
-  const d = await getDevice(deviceId)
-  if (!d || d.admin_state !== 'enabled' || d.fail_streak >= 3) return false
-  const next = parseMs(d.next_eligible_at)
+/**
+ * 该设备当前是否"可以接单"（仅用于心跳里的提示，不做最终裁决）。
+ *
+ * ⚠ 接受**已取到的 device 行**而不是 deviceId：早期这里又 `getDevice` 一次，
+ * 加上 guard 与 applyHeartbeat 的读取，同一设备一次心跳被读 **3 次** devices。
+ * 同时把「今日已用额度」从 `countTodayDone`（全表聚合）改为直接读 `daily_done` 列 ——
+ * 口径还与 `checkQuota` 一致了（原来一个是"成功数"、一个是"派发数"）。
+ */
+export function eligibleForTask(device: DeviceRow | null): boolean {
+  if (!device) return false
+  if (device.admin_state !== 'enabled' || device.fail_streak >= 3) return false
+  const next = parseMs(device.next_eligible_at)
   if (next !== null && nowMs() < next) return false
-  const done = await countTodayDone(deviceId)
+  const today = localDateKey()
+  const raw = device.daily_done_date
+  const doneDate = raw === null || raw === undefined
+    ? null
+    : typeof raw === 'string' ? raw.slice(0, 10) : new Date(raw as unknown as string).toISOString().slice(0, 10)
+  const done = doneDate === today ? device.daily_done : 0
   return done < config.dispatch.dailyQuotaPerAccount
 }
 

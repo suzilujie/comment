@@ -250,6 +250,12 @@ class AgentService : Service() {
         // 清理上一轮遗留的相册条目与过期素材缓存
         runCatching { MaterialStore.sweepLegacyAlbum(this) }
         runCatching { MaterialStore.pruneCache(this) }
+        // 清理本地任务记录（WAL）：每任务一行、长期运行会无限增长（`prune` 之前从未被调用）。
+        // 只保留 30 天 —— 更早的记录对「会不会重复评论」的判定已无意义。
+        runCatching {
+            AgentDb.get(this).taskDao().prune(Time.nowMs() - 30L * 24 * 3600_000)
+            Log.i(TAG, "已清理 30 天前的本地任务记录")
+        }.onFailure { Log.w(TAG, "清理本地任务记录失败：${it.message}") }
 
         // 恢复切城计时（单调时钟锚点）
         runCatching { CityRotator.onServiceStart(this) }
@@ -301,6 +307,13 @@ class AgentService : Service() {
 
     /** 单轮队列重传的总超时：超时就放手，绝不能让重传拖住心跳 */
     private val FLUSH_TOTAL_TIMEOUT_MS = 20_000L
+
+    /** 上次上报「无障碍掉线」告警的时刻（单调时钟），用于节流 */
+    @Volatile
+    private var lastA11yAlertAt: Long = 0L
+
+    /** 无障碍告警上报间隔：把「每 30 秒一次」降到「每 10 分钟一次」 */
+    private val A11Y_ALERT_INTERVAL_MS = 10 * 60_000L
 
     private fun startHeartbeatLoop() {
         heartbeatJob = scope.launch {
@@ -726,15 +739,23 @@ class AgentService : Service() {
                 runCatching {
                     val needHuman = Watchdog.check(this@AgentService)
                     if (needHuman) {
-                        reporter.sendEvent(
-                            event = "device_offline_notice",
-                            reasonCode = "accessibility_down",
-                            detail = buildJsonObject {
-                                put("describe", Watchdog.describe(this@AgentService))
-                                put("downCount", Watchdog.a11yDownCount)
-                            },
-                        )
                         Notify.update(this@AgentService, "需要人工处理：无障碍服务已关闭")
+                        // ⚠ 告警必须**节流**：无障碍掉线后 Watchdog 每 30 秒都返回 true，
+                        // 早期就对每台设备每 30 秒上报一次 —— 10 台掉线 = 20 条事件/分钟，
+                        // 200 台规模下会淹掉后台（device_events 现在只记状态迁移，
+                        // 这类高频 notice 反而会成为新的膨胀源）。
+                        val now = Time.elapsedMs()
+                        if (now - lastA11yAlertAt >= A11Y_ALERT_INTERVAL_MS) {
+                            lastA11yAlertAt = now
+                            reporter.sendEvent(
+                                event = "device_offline_notice",
+                                reasonCode = "accessibility_down",
+                                detail = buildJsonObject {
+                                    put("describe", Watchdog.describe(this@AgentService))
+                                    put("downCount", Watchdog.a11yDownCount)
+                                },
+                            )
+                        }
                     }
                 }.onFailure { Log.w(TAG, "watchdog 异常：${it.message}") }
             }

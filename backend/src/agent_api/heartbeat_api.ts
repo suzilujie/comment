@@ -37,8 +37,9 @@ route.post('/', async (c) => {
   // 人格档案按设备下发（P3 会真正用到 profile 内容）
   const personality = await loadPersonality(row.id)
 
-  // 是否有派单资格（仅提示；最终由 claim 裁决）
-  const eligible = await eligibleForTask(row.id)
+  // 是否有派单资格（仅提示；最终由 claim 裁决）。
+  // 复用 applyHeartbeat 已取到的行，不再重复读 devices。
+  const eligible = eligibleForTask(row)
 
   const resp = buildHeartbeatResponse({
     serverTimeMs: nowMs(),

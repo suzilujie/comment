@@ -60,7 +60,9 @@ export async function applyHeartbeat(req: HeartbeatRequest): Promise<DeviceRow> 
     nowMs() - prevSeenMs <= config.heartbeat.offlineAlertThresholdSeconds * 1000
 
   const s = req.state
-  await sql`
+  // ⚠ UPSERT 直接 RETURNING * ：原实现写完之后又 `getDevice` 查了一次，
+  // 而心跳路径上 guard / applyHeartbeat / eligibleForTask 各读一次 —— 同一行读 3 次。
+  const upserted = (await sql`
     INSERT INTO devices (id, model, resolution, dpi, os_version, rom_version,
                          font_scale, dark_mode, agent_version, admin_state,
                          last_seen_at, last_ip, last_ip_city, ipv6_leak,
@@ -101,7 +103,11 @@ export async function applyHeartbeat(req: HeartbeatRequest): Promise<DeviceRow> 
       -- 心跳即在线：把离线扫描置上的 presence 复位（离线判定见 scheduler.scanOfflineDevices）
       presence = 'online',
       updated_at = NOW()
-  `
+    RETURNING *
+  `) as unknown as DeviceRow[]
+
+  const row = upserted[0]
+  if (!row) throw new Error(`device not found after heartbeat: ${req.deviceId}`)
 
   if (!wasOnline) {
     await sql`
@@ -111,9 +117,6 @@ export async function applyHeartbeat(req: HeartbeatRequest): Promise<DeviceRow> 
     emit(EVENTS.DEVICE_PRESENCE, { deviceId: req.deviceId, from: 'offline', to: 'online' })
   }
   emit(EVENTS.HEARTBEAT, { deviceId: req.deviceId, atMs: nowMs() })
-
-  const row = await getDevice(req.deviceId)
-  if (!row) throw new Error(`device not found after heartbeat: ${req.deviceId}`)
   return row
 }
 

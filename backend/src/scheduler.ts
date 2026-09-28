@@ -113,6 +113,35 @@ export async function refreshCityPool(): Promise<void> {
   }
 }
 
+/**
+ * 4. 历史数据清理（每日一次）。
+ *
+ * ⚠ 事件表原本**没有任何清理机制**：200 台规模下 task_events 约 36 万行/月、
+ * device_events 若还有抖动也会持续增长，只增不减会把表和索引撑爆（VACUUM 变慢、
+ * 时间范围查询退化成顺序扫描）。这里按保留期删除，保留期可用 env 覆盖。
+ * `tasks` 本体**不删** —— 它是业务记录，且量级可控（约 12 万行/月）。
+ */
+export async function pruneHistory(): Promise<number> {
+  const sql = db()
+  const devDays = Number(process.env.RETENTION_DEVICE_EVENT_DAYS ?? 30)
+  const taskEvDays = Number(process.env.RETENTION_TASK_EVENT_DAYS ?? 90)
+  let removed = 0
+  const a = await sql`
+    DELETE FROM device_events
+    WHERE created_at < NOW() - ${`${devDays} days`}::interval
+  `
+  removed += a.count
+  const b = await sql`
+    DELETE FROM task_events
+    WHERE created_at < NOW() - ${`${taskEvDays} days`}::interval
+  `
+  removed += b.count
+  if (removed > 0) {
+    log.info(`history pruned: device_events(>${devDays}d) + task_events(>${taskEvDays}d) = ${removed} rows`)
+  }
+  return removed
+}
+
 /** 启动定时器 */
 export function startScheduler(): void {
   if (timer) return
@@ -127,6 +156,7 @@ export function startScheduler(): void {
         await scanOverdueTasks()
         await scanOfflineDevices()
         if (tick % 10 === 0) await refreshCityPool()
+        if (tick % 2880 === 0) await pruneHistory() // 30s × 2880 = 24 小时
       } catch (e) {
         log.error('scheduler tick failed:', e)
       }

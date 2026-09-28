@@ -235,11 +235,12 @@ export async function findInFlightByDevice(deviceId: string): Promise<TaskRow | 
 /** 该设备今日已完成的条数（按 UTC+8 自然日判定） */
 export async function countTodayDone(deviceId: string): Promise<number> {
   const sql = db()
+  const { start, end } = localDayRange()
   const rows = (await sql`
     SELECT COUNT(*)::int AS n FROM tasks
     WHERE device_id = ${deviceId}
       AND status = 'succeeded'
-      AND (finished_at AT TIME ZONE 'Asia/Shanghai')::date = ${localDateKey()}::date
+      AND finished_at >= ${start} AND finished_at < ${end}
   `) as unknown as { n: number }[]
   return rows[0]?.n ?? 0
 }
@@ -259,6 +260,7 @@ export async function countDevicePostComments(
   includeUnknown: boolean,
 ): Promise<number> {
   const sql = db()
+  const { start, end } = localDayRange()
   const rows = (await sql`
     SELECT COUNT(*)::int AS n FROM tasks
     WHERE device_id = ${deviceId} AND post_id = ${postId}
@@ -266,7 +268,7 @@ export async function countDevicePostComments(
         status IN ('succeeded', 'dispatched', 'executing')
         OR (${includeUnknown} AND status = 'unknown')
       )
-      AND (dispatched_at AT TIME ZONE 'Asia/Shanghai')::date = ${localDateKey()}::date
+      AND dispatched_at >= ${start} AND dispatched_at < ${end}
   `) as unknown as { n: number }[]
   return rows[0]?.n ?? 0
 }

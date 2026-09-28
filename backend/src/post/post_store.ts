@@ -175,7 +175,8 @@ export interface DispatchCandidate {
 export async function findDispatchablePost(
   deviceId: string,
   city: string,
-  todayKey: string,
+  dayStart: Date,
+  dayEnd: Date,
   unknownOccupiesPostSlot: boolean,
 ): Promise<DispatchCandidate | null> {
   const sql = db()
@@ -199,7 +200,8 @@ export async function findDispatchablePost(
         AND NOT EXISTS (
           SELECT 1 FROM tasks t2
           WHERE t2.device_id = ${deviceId} AND t2.post_id = p.id
-            AND (t2.dispatched_at AT TIME ZONE 'Asia/Shanghai')::date = ${todayKey}::date
+            -- 用区间而不是 (col AT TIME ZONE ...)::date = 键：后者非 sargable，索引失效
+            AND t2.dispatched_at >= ${dayStart} AND t2.dispatched_at < ${dayEnd}
             AND (
               t2.status IN ('succeeded', 'dispatched', 'executing')
               OR (${unknownOccupiesPostSlot} AND t2.status = 'unknown')

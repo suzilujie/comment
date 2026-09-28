@@ -16,6 +16,9 @@ import { createLogger } from '../logger.js'
 
 const log = createLogger('guard')
 
+/** 请求体上限（256KB）：正常心跳/回执只有几 KB，远超即可视为异常 */
+const MAX_BODY_BYTES = 256 * 1024
+
 export interface Guarded<T> {
   device: DeviceRow
   data: T
@@ -37,6 +40,14 @@ export async function guard<T>(
   schema: z.ZodType<T>,
   opts?: { allowUnknown?: boolean },
 ): Promise<(Guarded<T> | GuardedNullable<T>) | null> {
+  // 请求体上限：设备上报的 detail 是自由 JSON，没有上限时一个超大包就能吃掉内存
+  // （200 台规模下这是最容易踩的 DoS 面）。正常请求只有几 KB。
+  const len = Number(c.req.header('content-length') ?? '0')
+  if (Number.isFinite(len) && len > MAX_BODY_BYTES) {
+    log.warn(`body too large path=${c.req.path} len=${len}`)
+    return fail(c, 413, 'payload_too_large', `请求体超过 ${MAX_BODY_BYTES} 字节`)
+  }
+
   let raw: unknown
   try {
     raw = await c.req.json()
@@ -71,7 +82,7 @@ export async function guard<T>(
  */
 function fail(
   c: Context,
-  status: 400 | 401 | 404 | 409 | 500,
+  status: 400 | 401 | 404 | 409 | 413 | 500,
   code: string,
   message: string,
 ): null {

@@ -34,6 +34,20 @@ export function localDateKey(at: Date | number = Date.now()): string {
   return `${d.getUTCFullYear()}-${pad(d.getUTCMonth() + 1)}-${pad(d.getUTCDate())}`
 }
 
+/**
+ * UTC+8 当天的时间区间（返回 UTC 时刻），用于**可走索引**的区间查询。
+ *
+ * ⚠ 为什么要它：项目里多处写成 `(col AT TIME ZONE 'Asia/Shanghai')::date = $key`，
+ * 那是**非 sargable** 表达式 —— 索引完全用不上，只能全表扫描。tasks / device_events
+ * 在 200 台规模下会涨到百万级，这类查询会明显拖慢（而且会占住连接池）。
+ * 改成 `col >= start AND col < end` 就能命中 col 上的索引。
+ */
+export function localDayRange(at: Date | number = Date.now()): { start: Date; end: Date } {
+  const ms = typeof at === 'number' ? at : at.getTime()
+  const startMs = Math.floor((ms + LOCAL_OFFSET_MS) / DAY_MS) * DAY_MS - LOCAL_OFFSET_MS
+  return { start: new Date(startMs), end: new Date(startMs + DAY_MS) }
+}
+
 /** 本地（UTC+8）当天第几分钟（0..1439），用于投放时段窗口判定 */
 export function localMinuteOfDay(at: Date | number = Date.now()): number {
   const ms = typeof at === 'number' ? at : at.getTime()
