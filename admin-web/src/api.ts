@@ -256,18 +256,52 @@ export interface PageQuery {
   offset?: number
 }
 
-/** 任务列表额外支持状态过滤（须服务端过滤，否则只作用于当前页） */
+/** 任务列表筛选（**必须服务端过滤**，否则只作用于当前页，页码与总数会错位） */
 export interface TaskQuery extends PageQuery {
+  /** dispatched / executing / succeeded / failed / aborted / unknown */
   status?: string
+  /** 关键词：任务 ID / 帖子 ID / 设备 ID */
+  q?: string
 }
 
-/** 拼查询串；offset 为 0 时省略，保持 URL 干净便于排障 */
-function qs(p?: PageQuery & { status?: string }): string {
+/** 设备列表筛选 */
+export interface DeviceQuery extends PageQuery {
+  /** 在线：true=在线 / false=离线 / 缺省=全部（false 与缺省语义不同，不能省略） */
+  online?: boolean
+  /** 'ok'=三项自检全绿 / 'problem'=任一异常 */
+  health?: 'ok' | 'problem'
+  /** 属地（省级，精确匹配） */
+  city?: string
+  /** 关键词：设备 ID / 机型 */
+  q?: string
+}
+
+/** 帖子池筛选 */
+export interface PostQuery extends PageQuery {
+  status?: string
+  /** 属地（省级，精确匹配） */
+  city?: string
+  /** video | image */
+  postType?: string
+  /** true = 只看「有余量却派不出去」（缺素材）的帖子 */
+  blocked?: boolean
+}
+
+/**
+ * 拼查询串：跳过 `undefined` / `null` / 空串（= 不筛），并省略 `offset=0`
+ * （保持 URL 干净，排障时一眼能看出到底带了哪些筛选）。
+ *
+ * ⚠ **绝不能跳过 `false`** —— 设备的 `online=false`（只看离线）与根本不上报（看全部）
+ * 是两个不同语义，用 `if (v)` 判断会把前者静默吞掉。
+ */
+function qs(p?: object): string {
   if (!p) return ''
   const s = new URLSearchParams()
-  if (p.limit != null) s.set('limit', String(p.limit))
-  if (p.offset != null && p.offset > 0) s.set('offset', String(p.offset))
-  if (p.status) s.set('status', p.status)
+  for (const [k, v] of Object.entries(p as Record<string, unknown>)) {
+    if (v === undefined || v === null || v === '') continue
+    if (k === 'offset' && v === 0) continue
+    s.set(k, String(v))
+  }
   const t = s.toString()
   return t ? `?${t}` : ''
 }
@@ -285,11 +319,11 @@ export const api = {
   },
 
   overview: () => req<Overview>('/overview'),
-  devices: (p?: PageQuery) =>
+  devices: (p?: DeviceQuery) =>
     req<Paged<DeviceItem> & { onlineThresholdSeconds: number }>(`/devices${qs(p)}`),
   tasks: (p?: TaskQuery) => req<Paged<TaskItem>>(`/tasks${qs(p)}`),
   unknownTasks: (p?: PageQuery) => req<Paged<TaskItem>>(`/unknown-tasks${qs(p)}`),
-  posts: (p?: PageQuery) => req<Paged<PostItem>>(`/posts${qs(p)}`),
+  posts: (p?: PostQuery) => req<Paged<PostItem>>(`/posts${qs(p)}`),
   events: (p?: PageQuery) => req<Paged<EventItem>>(`/events${qs(p)}`),
 
   resetCounters: (deviceId: string) =>

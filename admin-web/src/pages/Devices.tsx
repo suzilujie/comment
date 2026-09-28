@@ -1,6 +1,21 @@
+import { useState } from 'react'
 import { api, COMMAND_KINDS, fmtGap, fmtTime } from '../api'
 import type { CommandKind } from '../api'
-import { Badge, Btn, Card, Empty, ErrorBox, Pager, Spinner, Table, Td, useFetch, usePaging } from '../ui'
+import {
+  Badge,
+  Btn,
+  Card,
+  Empty,
+  ErrorBox,
+  FilterSearch,
+  FilterSelect,
+  Pager,
+  Spinner,
+  Table,
+  Td,
+  useFetch,
+  usePaging,
+} from '../ui'
 
 interface Props {
   autoMs: number
@@ -16,12 +31,40 @@ function PermissionBadge({ label, ok }: { label: string; ok: boolean | null }) {
 }
 
 export default function Devices({ autoMs, refreshKey, notify }: Props) {
+  // ── 筛选（全部下推到服务端；前端过滤在分页下只会作用于当前页）──
+  const [fOnline, setFOnline] = useState('all')
+  const [fHealth, setFHealth] = useState('all')
+  const [fCity, setFCity] = useState('all')
+  const [fQ, setFQ] = useState('')
   const pg = usePaging()
   const dev = useFetch(
-    () => api.devices({ limit: pg.pageSize, offset: pg.offset }),
-    [refreshKey, pg.page, pg.pageSize],
+    () =>
+      api.devices({
+        limit: pg.pageSize,
+        offset: pg.offset,
+        online: fOnline === 'all' ? undefined : fOnline === 'online',
+        health: fHealth === 'all' ? undefined : (fHealth as 'ok' | 'problem'),
+        city: fCity === 'all' ? undefined : fCity,
+        q: fQ || undefined,
+      }),
+    [refreshKey, pg.page, pg.pageSize, fOnline, fHealth, fCity, fQ],
     autoMs,
   )
+  // 属地候选取省份池（与帖子池同一份口径，避免出现池中没有的属地名）
+  const cities = useFetch(() => api.cities({ limit: 500 }), [refreshKey])
+  const cityOptions = [
+    { value: 'all', label: '全部属地' },
+    ...(cities.data?.items ?? []).map((c) => ({ value: c.city, label: c.city })),
+  ]
+  const dirty = fOnline !== 'all' || fHealth !== 'all' || fCity !== 'all' || fQ !== ''
+  const reset = () => {
+    setFOnline('all')
+    setFHealth('all')
+    setFCity('all')
+    setFQ('')
+    pg.setPage(0)
+  }
+
 
   const doReset = async (id: string, model: string | null) => {
     const ok = window.confirm(
@@ -67,14 +110,68 @@ export default function Devices({ autoMs, refreshKey, notify }: Props) {
       title="设备"
       subtitle="按最后心跳倒序；「复位计数」归零日计数，「下发指令」可触发领取/切省/自检/暂停等"
       actions={
-        <Btn onClick={dev.reload} disabled={dev.loading}>
-          刷新
-        </Btn>
+        <div className="flex flex-wrap items-center gap-2">
+          {/* 筛选一律走服务端，且每次变更都回第 1 页（否则会停在越界页码上） */}
+          <FilterSelect
+            label="状态"
+            value={fOnline}
+            onChange={(v) => {
+              setFOnline(v)
+              pg.setPage(0)
+            }}
+            options={[
+              { value: 'all', label: '全部' },
+              { value: 'online', label: '在线' },
+              { value: 'offline', label: '离线' },
+            ]}
+          />
+          <FilterSelect
+            label="健康"
+            value={fHealth}
+            onChange={(v) => {
+              setFHealth(v)
+              pg.setPage(0)
+            }}
+            options={[
+              { value: 'all', label: '全部' },
+              { value: 'problem', label: '有异常' },
+              { value: 'ok', label: '全绿' },
+            ]}
+          />
+          <FilterSelect
+            label="属地"
+            value={fCity}
+            onChange={(v) => {
+              setFCity(v)
+              pg.setPage(0)
+            }}
+            options={cityOptions}
+          />
+          <FilterSearch
+            label="搜索"
+            value={fQ}
+            placeholder="设备 ID / 机型"
+            onCommit={(v) => {
+              setFQ(v)
+              pg.setPage(0)
+            }}
+          />
+          {dirty && (
+            <Btn small tone="ghost" onClick={reset} title="清空全部筛选">
+              重置
+            </Btn>
+          )}
+          <Btn onClick={dev.reload} disabled={dev.loading}>
+            刷新
+          </Btn>
+        </div>
       }
     >
       {dev.loading && !dev.data && <Spinner />}
       {dev.error && <ErrorBox msg={dev.error} onRetry={dev.reload} />}
-      {dev.data && dev.data.items.length === 0 && <Empty text="还没有设备上报心跳" />}
+      {dev.data && dev.data.items.length === 0 && (
+        <Empty text={dirty ? '没有符合筛选条件的设备' : '还没有设备上报心跳'} />
+      )}
       {dev.data && dev.data.items.length > 0 && (
         <Table
           head={[

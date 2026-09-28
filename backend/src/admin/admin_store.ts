@@ -113,11 +113,30 @@ export interface AdminPostRow {
   blocked_reason: string | null
 }
 
-/** 帖子池 + 统计（管理台首屏要看"为什么领不到"） */
-export async function listPostsWithStats(limit = 200, offset = 0): Promise<AdminPostRow[]> {
+/** 帖子池筛选（管理台） */
+export interface PostFilter {
+  status?: string
+  /** 属地（省级，精确匹配） */
+  city?: string
+  /** 帖子形态：video | image */
+  postType?: string
+  /** true = 只看「有余量却派不出去」的（缺素材），见 blocked_reason */
+  blockedOnly?: boolean
+}
+
+/**
+ * 帖子池的基础投影（含 committed / today_used / blocked_reason 等派生列）。
+ *
+ * 抽出来是因为 `blocked_reason` 是一条很长的 CASE，而「只看派不出去的」筛选**要按它过滤**；
+ * 若列表与计数各写一遍，两边迟早漂移 —— 那时会出现"总数说有 3 条缺素材，翻页却一条都看不到"。
+ *
+ * ⚠ 这里刻意**不写 SQL 行内注释**：本片段会被嵌进 `WITH base AS (...)`，
+ * 若片段里带 `--` 注释，注入位置一旦变化就会把后面的 SQL 一起注释掉。
+ */
+function postBaseSelect() {
   const sql = db()
   const today = localDateKey()
-  return (await sql`
+  return sql`
     SELECT
       p.id, p.url, p.city, p.post_type, p.status, p.title, p.target_count, p.last_comment_at,
       (SELECT COUNT(*)::int FROM tasks t
@@ -130,7 +149,6 @@ export async function listPostsWithStats(limit = 200, offset = 0): Promise<Admin
       (SELECT COUNT(*)::int FROM tasks t WHERE t.post_id = p.id AND t.status = 'succeeded') AS succeeded,
       (SELECT COUNT(*)::int FROM tasks t WHERE t.post_id = p.id AND t.status = 'unknown')   AS unknown,
       (SELECT COUNT(*)::int FROM tasks t WHERE t.post_id = p.id AND t.status = 'failed')    AS failed,
-      -- 「派不出去」的归因：只针对"本该可派"的帖子（active 且仍有余量）
       CASE
         WHEN p.status <> 'active' THEN NULL
         WHEN p.committed >= p.target_count THEN NULL
@@ -149,17 +167,52 @@ export async function listPostsWithStats(limit = 200, offset = 0): Promise<Admin
         ELSE NULL
       END AS blocked_reason
     FROM posts p
+  `
+}
+
+/** 列表与计数共用的筛选 WHERE（口径一致才能保证 total 与 items 对得上） */
+function postWhere(f: PostFilter) {
+  const sql = db()
+  const st = f.status ?? null
+  const ct = f.city ?? null
+  const pt = f.postType ?? null
+  return sql`
+    (${st}::text IS NULL OR status = ${st})
+    AND (${ct}::text IS NULL OR city = ${ct})
+    AND (${pt}::text IS NULL OR post_type = ${pt})
+    AND (${f.blockedOnly === true}::boolean IS NOT TRUE OR blocked_reason IS NOT NULL)
+  `
+}
+
+/** 帖子池 + 统计（管理台首屏要看"为什么领不到"） */
+export async function listPostsWithStats(
+  limit = 200,
+  offset = 0,
+  filter: PostFilter = {},
+): Promise<AdminPostRow[]> {
+  const sql = db()
+  const base = postBaseSelect()
+  const where = postWhere(filter)
+  return (await sql`
+    WITH base AS (${base})
+    SELECT * FROM base
+    WHERE ${where}
     ORDER BY
-      CASE p.status WHEN 'active' THEN 0 WHEN 'paused' THEN 1 ELSE 2 END,
-      p.city, p.id
+      CASE status WHEN 'active' THEN 0 WHEN 'paused' THEN 1 ELSE 2 END,
+      city, id
     LIMIT ${limit} OFFSET ${offset}
   `) as unknown as AdminPostRow[]
 }
 
-/** 帖子总数（管理台分页用） */
-export async function countPosts(): Promise<number> {
+/** 帖子总数（管理台分页用）；筛选口径与 [listPostsWithStats] 完全一致 */
+export async function countPosts(filter: PostFilter = {}): Promise<number> {
   const sql = db()
-  const rows = (await sql`SELECT COUNT(*)::int AS n FROM posts`) as unknown as { n: number }[]
+  const base = postBaseSelect()
+  const where = postWhere(filter)
+  const rows = (await sql`
+    WITH base AS (${base})
+    SELECT COUNT(*)::int AS n FROM base WHERE ${where}
+  `) as unknown as { n: number }[]
   return rows[0]?.n ?? 0
 }
 

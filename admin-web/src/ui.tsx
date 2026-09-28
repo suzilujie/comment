@@ -288,6 +288,86 @@ export function Field({ label, children }: { label: string; children: ReactNode 
   )
 }
 
+// ── 列表筛选 ────────────────────────────────────────────────
+// 约定：筛选值统一用字符串，`'all'` 表示"不筛"。所有筛选都必须下推到服务端 ——
+// 前端 filter 在分页下只作用于当前页，会出现"共 N 条却只看到几行"的错位。
+
+/** 筛选下拉 */
+export function FilterSelect({
+  label,
+  value,
+  options,
+  onChange,
+  width = '',
+}: {
+  label: string
+  value: string
+  options: { value: string; label: string }[]
+  onChange: (v: string) => void
+  width?: string
+}) {
+  return (
+    <label className="flex items-center gap-1.5 text-xs text-slate-400">
+      <span className="shrink-0 text-slate-500">{label}</span>
+      <select
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        className={`${width} rounded-md border border-slate-700 bg-slate-800 px-2 py-1 text-xs text-slate-200 outline-none focus:border-sky-600`}
+      >
+        {options.map((o) => (
+          <option key={o.value} value={o.value}>
+            {o.label}
+          </option>
+        ))}
+      </select>
+    </label>
+  )
+}
+
+/**
+ * 筛选搜索框：**回车 / 失焦才提交**。
+ *
+ * 每敲一个字符就打一次接口会连带刷新分页与 total，既卡顿又刷屏；
+ * 用"受控草稿 + 显式提交"，体验等同于表单搜索。Esc 可放弃本次输入。
+ */
+export function FilterSearch({
+  label,
+  value,
+  placeholder,
+  onCommit,
+  width = 'w-40',
+}: {
+  label: string
+  value: string
+  placeholder?: string
+  onCommit: (v: string) => void
+  width?: string
+}) {
+  const [draft, setDraft] = useState(value)
+  // 外部值变化（例如点了「重置」）时同步回草稿
+  useEffect(() => setDraft(value), [value])
+  const commit = () => {
+    const v = draft.trim()
+    if (v !== value) onCommit(v)
+  }
+  return (
+    <label className="flex items-center gap-1.5 text-xs text-slate-400">
+      <span className="shrink-0 text-slate-500">{label}</span>
+      <input
+        value={draft}
+        placeholder={placeholder}
+        onChange={(e) => setDraft(e.target.value)}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter') commit()
+          if (e.key === 'Escape') setDraft(value)
+        }}
+        onBlur={commit}
+        className={`${width} rounded-md border border-slate-700 bg-slate-800 px-2 py-1 text-xs text-slate-200 outline-none focus:border-sky-600`}
+      />
+    </label>
+  )
+}
+
 // ── 分页 ────────────────────────────────────────────────────
 
 /**

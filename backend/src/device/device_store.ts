@@ -158,9 +158,55 @@ export async function clearBusy(deviceId: string, taskId: string): Promise<void>
   `
 }
 
-/** 设备列表（看板用；分页：limit + offset） */
-export async function listDevices(limit = 200, offset = 0): Promise<DeviceRow[]> {
+/** 设备列表筛选（管理台） */
+export interface DeviceFilter {
+  /** 在线：true=在线 / false=离线 / undefined=全部（口径同 isOnline） */
+  online?: boolean
+  /** 健康：'ok'=三项自检全绿 / 'problem'=任一异常 / undefined=全部 */
+  health?: 'ok' | 'problem'
+  /** 属地（省级，精确匹配） */
+  city?: string
+  /** 关键词：设备 ID / 机型 */
+  q?: string
+}
+
+/**
+ * 组装设备筛选 WHERE。
+ *
+ * ⚠ 列表与计数**必须共用这一段** —— 两边口径一旦不一致，翻到最后一页会看到空白页
+ * （total 说还有几百条，items 却已经取空了），而且极难归因。
+ * 所有筛选都下推到 SQL：前端过滤在分页下只作用于当前页。
+ */
+function deviceWhere(f: DeviceFilter) {
   const sql = db()
+  const parts = [sql`TRUE`]
+  if (f.online !== undefined) {
+    const online = sql`(last_seen_at IS NOT NULL AND last_seen_at >= NOW() - ${config.heartbeat.onlineThresholdSeconds} * INTERVAL '1 second')`
+    parts.push(f.online ? online : sql`NOT ${online}`)
+  }
+  if (f.health === 'ok') {
+    parts.push(sql`(accessibility_ok IS TRUE AND foreground_ok IS TRUE AND proxy_ok IS TRUE)`)
+  } else if (f.health === 'problem') {
+    parts.push(
+      sql`(accessibility_ok IS NOT TRUE OR foreground_ok IS NOT TRUE OR proxy_ok IS NOT TRUE)`,
+    )
+  }
+  if (f.city) parts.push(sql`last_ip_city = ${f.city}`)
+  if (f.q) {
+    const like = `%${f.q}%`
+    parts.push(sql`(id ILIKE ${like} OR model ILIKE ${like})`)
+  }
+  return parts.reduce((acc, p) => sql`${acc} AND ${p}`)
+}
+
+/** 设备列表（看板用；分页：limit + offset） */
+export async function listDevices(
+  limit = 200,
+  offset = 0,
+  filter: DeviceFilter = {},
+): Promise<DeviceRow[]> {
+  const sql = db()
+  const where = deviceWhere(filter)
   return (await sql`
     SELECT id, admin_state, last_seen_at, last_ip, last_ip_city,
            accessibility_ok, foreground_ok, proxy_ok, busy_task_id,
@@ -169,14 +215,18 @@ export async function listDevices(limit = 200, offset = 0): Promise<DeviceRow[]>
            daily_done, daily_done_date, next_eligible_at, fail_streak,
            total_success, total_fail, total_unknown
     FROM devices
+    WHERE ${where}
     ORDER BY last_seen_at DESC NULLS LAST
     LIMIT ${limit} OFFSET ${offset}
   `) as unknown as DeviceRow[]
 }
 
-/** 设备总数（管理台分页用） */
-export async function countDevices(): Promise<number> {
+/** 设备总数（管理台分页用；口径与 [listDevices] 完全一致） */
+export async function countDevices(filter: DeviceFilter = {}): Promise<number> {
   const sql = db()
-  const rows = (await sql`SELECT COUNT(*)::int AS n FROM devices`) as unknown as { n: number }[]
+  const where = deviceWhere(filter)
+  const rows = (await sql`
+    SELECT COUNT(*)::int AS n FROM devices WHERE ${where}
+  `) as unknown as { n: number }[]
   return rows[0]?.n ?? 0
 }

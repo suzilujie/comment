@@ -1,7 +1,21 @@
 import { useState } from 'react'
 import { api, fmtTime, statusTone } from '../api'
 import type { TaskItem } from '../api'
-import { Badge, Btn, Card, Empty, ErrorBox, Pager, Spinner, Table, Td, useFetch, usePaging } from '../ui'
+import {
+  Badge,
+  Btn,
+  Card,
+  Empty,
+  ErrorBox,
+  FilterSearch,
+  FilterSelect,
+  Pager,
+  Spinner,
+  Table,
+  Td,
+  useFetch,
+  usePaging,
+} from '../ui'
 
 interface Props {
   autoMs: number
@@ -19,22 +33,26 @@ function duration(task: TaskItem): string {
 }
 
 export default function Tasks({ autoMs, refreshKey, notify }: Props) {
-  const [onlyUnknown, setOnlyUnknown] = useState(false)
+  // ── 筛选（全部服务端；前端 filter 在分页下只作用于当前页）──
+  // 原来的「仅看 unknown」复选框被状态下拉取代：语义等价（选 unknown 即可），
+  // 但顺带能筛 failed / aborted / succeeded，不必再靠肉眼扫全表。
+  const [fStatus, setFStatus] = useState('all')
+  const [fQ, setFQ] = useState('')
   const pg = usePaging()
-  // ⚠ 状态过滤必须走**服务端**（api.tasks 的 status 参数）：前端 filter 只作用于当前页，
-  //    一加分页就会出现「共 N 条、但只看到几行」的错位显示。
   const tasks = useFetch(
     () =>
       api.tasks({
         limit: pg.pageSize,
         offset: pg.offset,
-        status: onlyUnknown ? 'unknown' : undefined,
+        status: fStatus === 'all' ? undefined : fStatus,
+        q: fQ || undefined,
       }),
-    [refreshKey, onlyUnknown, pg.page, pg.pageSize],
+    [refreshKey, fStatus, fQ, pg.page, pg.pageSize],
     autoMs,
   )
 
   const items = tasks.data?.items ?? []
+  const dirty = fStatus !== 'all' || fQ !== ''
 
   const resolve = async (taskId: string, verdict: 'succeeded' | 'failed') => {
     const isOk = verdict === 'succeeded'
@@ -58,28 +76,59 @@ export default function Tasks({ autoMs, refreshKey, notify }: Props) {
       title="任务"
       subtitle="unknown = 可能已发出（读不到证据），必须人工核实后订正，禁止自动重试"
       actions={
-        <>
-          <label className="flex cursor-pointer items-center gap-1.5 text-xs text-slate-400 select-none">
-            <input
-              type="checkbox"
-              checked={onlyUnknown}
-              onChange={(e) => {
-                setOnlyUnknown(e.target.checked)
-                pg.setPage(0) // 换过滤条件必须回第 1 页，否则可能停在一个越界页码上
+        <div className="flex flex-wrap items-center gap-2">
+          {/* 筛选一律走服务端，且每次变更都回第 1 页（否则会停在越界页码上） */}
+          <FilterSelect
+            label="状态"
+            value={fStatus}
+            onChange={(v) => {
+              setFStatus(v)
+              pg.setPage(0)
+            }}
+            options={[
+              { value: 'all', label: '全部' },
+              { value: 'unknown', label: 'unknown（待人工确认）' },
+              { value: 'dispatched', label: 'dispatched' },
+              { value: 'executing', label: 'executing' },
+              { value: 'succeeded', label: 'succeeded' },
+              { value: 'failed', label: 'failed' },
+              { value: 'aborted', label: 'aborted' },
+            ]}
+          />
+          <FilterSearch
+            label="搜索"
+            value={fQ}
+            placeholder="任务 / 帖子 / 设备 ID"
+            onCommit={(v) => {
+              setFQ(v)
+              pg.setPage(0)
+            }}
+          />
+          {dirty && (
+            <Btn
+              small
+              tone="ghost"
+              onClick={() => {
+                setFStatus('all')
+                setFQ('')
+                pg.setPage(0)
               }}
-              className="h-3.5 w-3.5 accent-amber-500"
-            />
-            仅看 unknown
-          </label>
+              title="清空全部筛选"
+            >
+              重置
+            </Btn>
+          )}
           <Btn onClick={tasks.reload} disabled={tasks.loading}>
             刷新
           </Btn>
-        </>
+        </div>
       }
     >
       {tasks.loading && !tasks.data && <Spinner />}
       {tasks.error && <ErrorBox msg={tasks.error} onRetry={tasks.reload} />}
-      {tasks.data && items.length === 0 && <Empty text={onlyUnknown ? '没有 unknown 任务' : '暂无任务'} />}
+      {tasks.data && items.length === 0 && (
+        <Empty text={dirty ? '没有符合筛选条件的任务' : '暂无任务'} />
+      )}
       {items.length > 0 && (
         <Table
           head={['状态', '派发时间', '帖子', '设备', '形态', '话术 / 证据', '原因 / 耗时', '操作']}

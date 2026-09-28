@@ -1,6 +1,19 @@
 import { useState } from 'react'
 import { api, fmtTime, statusTone } from '../api'
-import { Badge, Btn, Card, Empty, ErrorBox, Pager, Spinner, Table, Td, useFetch, usePaging } from '../ui'
+import {
+  Badge,
+  Btn,
+  Card,
+  Empty,
+  ErrorBox,
+  FilterSelect,
+  Pager,
+  Spinner,
+  Table,
+  Td,
+  useFetch,
+  usePaging,
+} from '../ui'
 
 interface Props {
   autoMs: number
@@ -38,10 +51,25 @@ const inputCls =
  * `today_used > 0` 表示今天该帖已被占用过（受「同设备 × 同帖每天一次」限制）。
  */
 export default function Posts({ autoMs, refreshKey, notify }: Props) {
+  // ── 筛选（全部服务端；前端过滤在分页下只作用于当前页）──
+  const [fStatus, setFStatus] = useState('all')
+  const [fCity, setFCity] = useState('all')
+  const [fType, setFType] = useState('all')
+  const [fBlocked, setFBlocked] = useState('all')
+  const dirty = fStatus !== 'all' || fCity !== 'all' || fType !== 'all' || fBlocked !== 'all'
   const pg = usePaging()
   const posts = useFetch(
-    () => api.posts({ limit: pg.pageSize, offset: pg.offset }),
-    [refreshKey, pg.page, pg.pageSize],
+    () =>
+      api.posts({
+        limit: pg.pageSize,
+        offset: pg.offset,
+        status: fStatus === 'all' ? undefined : fStatus,
+        city: fCity === 'all' ? undefined : fCity,
+        postType: fType === 'all' ? undefined : fType,
+        // 只看「有余量却派不出去」的 —— 这是需要人工补素材的待办清单
+        blocked: fBlocked === 'blocked' ? true : undefined,
+      }),
+    [refreshKey, pg.page, pg.pageSize, fStatus, fCity, fType, fBlocked],
     autoMs,
   )
   // 省份池：属地是**精确匹配**的硬条件 —— 自由文本打错一个字（如「河北省」）帖子就
@@ -190,7 +218,76 @@ export default function Posts({ autoMs, refreshKey, notify }: Props) {
       title="帖子池"
       subtitle="committed = 已占用条数（成功 + 在途 + unknown）；状态旁的黄色标记 = 该帖有余量但派不出去（需补素材）"
       actions={
-        <div className="flex gap-2">
+        <div className="flex flex-wrap items-center gap-2">
+          {/* 筛选一律走服务端，且每次变更都回第 1 页（否则会停在越界页码上） */}
+          <FilterSelect
+            label="状态"
+            value={fStatus}
+            onChange={(v) => {
+              setFStatus(v)
+              pg.setPage(0)
+            }}
+            options={[
+              { value: 'all', label: '全部' },
+              { value: 'active', label: 'active' },
+              { value: 'paused', label: 'paused' },
+              { value: 'done', label: 'done' },
+              { value: 'invalid', label: 'invalid' },
+            ]}
+          />
+          <FilterSelect
+            label="省份"
+            value={fCity}
+            onChange={(v) => {
+              setFCity(v)
+              pg.setPage(0)
+            }}
+            options={[
+              { value: 'all', label: '全部省份' },
+              ...(cities.data?.items ?? []).map((c) => ({ value: c.city, label: c.city })),
+            ]}
+          />
+          <FilterSelect
+            label="形态"
+            value={fType}
+            onChange={(v) => {
+              setFType(v)
+              pg.setPage(0)
+            }}
+            options={[
+              { value: 'all', label: '全部' },
+              { value: 'video', label: '纯文字' },
+              { value: 'image', label: '图文' },
+            ]}
+          />
+          <FilterSelect
+            label=""
+            value={fBlocked}
+            onChange={(v) => {
+              setFBlocked(v)
+              pg.setPage(0)
+            }}
+            options={[
+              { value: 'all', label: '全部帖子' },
+              { value: 'blocked', label: '只看派不出去的' },
+            ]}
+          />
+          {dirty && (
+            <Btn
+              small
+              tone="ghost"
+              onClick={() => {
+                setFStatus('all')
+                setFCity('all')
+                setFType('all')
+                setFBlocked('all')
+                pg.setPage(0)
+              }}
+              title="清空全部筛选"
+            >
+              重置
+            </Btn>
+          )}
           <Btn onClick={() => setForm(emptyForm())} disabled={form !== null}>
             新增帖子
           </Btn>
@@ -335,7 +432,11 @@ export default function Posts({ autoMs, refreshKey, notify }: Props) {
       {posts.loading && !posts.data && <Spinner />}
       {posts.error && <ErrorBox msg={posts.error} onRetry={posts.reload} />}
       {posts.data && posts.data.items.length === 0 && (
-        <Empty text="帖子池为空 —— 点「新增帖子」加一个真实抖音链接" />
+        <Empty
+          text={
+            dirty ? '没有符合筛选条件的帖子' : '帖子池为空 —— 点「新增帖子」加一个真实抖音链接'
+          }
+        />
       )}
       {posts.data && posts.data.items.length > 0 && (
         <Table head={['帖子', '省份', '状态', '进度', '今占', '最近评论', '累计（成功/待确认/失败）', '操作']}>

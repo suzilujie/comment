@@ -13,6 +13,7 @@ import { join } from 'node:path'
 import { Hono } from 'hono'
 import { config } from '../config.js'
 import { countDevices, listDevices } from '../device/device_store.js'
+import type { DeviceFilter } from '../device/device_store.js'
 import { countTasks, listTasks } from '../task/task_store.js'
 import { login, tokenOf, verify } from './admin_auth.js'
 import {
@@ -35,6 +36,7 @@ import {
   listAvailableProvinces,
   listCitiesAdmin,
   listCommands,
+  type PostFilter,
   listMaterials,
   listPostsWithStats,
   listScripts,
@@ -91,13 +93,35 @@ function pageOf(
   }
 }
 
+/**
+ * 布尔筛选参数解析：`true/1` → true，`false/0` → false，其余（含缺省）→ undefined。
+ *
+ * ⚠ 必须区分「没传」与「传了 false」：设备的「在线状态」筛选里 `online=false`（只看离线）
+ * 与不传（全部都看）是两个不同的语义，用 `if (raw)` 判断会把前者吞掉。
+ */
+function boolOf(raw: string | undefined): boolean | undefined {
+  if (raw === 'true' || raw === '1') return true
+  if (raw === 'false' || raw === '0') return false
+  return undefined
+}
+
 // ── 查询 ────────────────────────────────────────────────────
 
 admin.get('/overview', async (c) => c.json(await getOverview()))
 
 admin.get('/devices', async (c) => {
-  const { limit, offset } = pageOf(c.req.query(), 20)
-  const [items, total] = await Promise.all([listDevices(limit, offset), countDevices()])
+  const raw = c.req.query()
+  const { limit, offset } = pageOf(raw, 20)
+  const filter: DeviceFilter = {
+    online: boolOf(raw.online),
+    health: raw.health === 'ok' || raw.health === 'problem' ? raw.health : undefined,
+    city: raw.city || undefined,
+    q: raw.q || undefined,
+  }
+  const [items, total] = await Promise.all([
+    listDevices(limit, offset, filter),
+    countDevices(filter),
+  ])
   const now = Date.now()
   return c.json({
     items: items.map((d) => {
@@ -115,12 +139,14 @@ admin.get('/devices', async (c) => {
 })
 
 admin.get('/tasks', async (c) => {
-  const { limit, offset } = pageOf(c.req.query(), 20)
-  // 状态过滤必须走服务端：前端过滤只会作用于当前页，页码与 total 会全部对不上
-  const status = c.req.query('status') || undefined
+  const raw = c.req.query()
+  const { limit, offset } = pageOf(raw, 20)
+  // 过滤必须走服务端：前端过滤只会作用于当前页，页码与 total 会全部对不上
+  const status = raw.status || undefined
+  const q = raw.q || undefined
   const [items, total] = await Promise.all([
-    listTasks(limit, offset, status),
-    countTasks(status),
+    listTasks(limit, offset, status, q),
+    countTasks(status, q),
   ])
   return c.json({ items, total })
 })
@@ -132,8 +158,18 @@ admin.get('/unknown-tasks', async (c) => {
 })
 
 admin.get('/posts', async (c) => {
-  const { limit, offset } = pageOf(c.req.query(), 20)
-  const [items, total] = await Promise.all([listPostsWithStats(limit, offset), countPosts()])
+  const raw = c.req.query()
+  const { limit, offset } = pageOf(raw, 20)
+  const filter: PostFilter = {
+    status: raw.status || undefined,
+    city: raw.city || undefined,
+    postType: raw.postType || undefined,
+    blockedOnly: boolOf(raw.blocked),
+  }
+  const [items, total] = await Promise.all([
+    listPostsWithStats(limit, offset, filter),
+    countPosts(filter),
+  ])
   return c.json({ items, total })
 })
 
