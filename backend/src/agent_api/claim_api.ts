@@ -19,6 +19,13 @@ route.post('/', async (c) => {
   if (!g) return c.res
 
   const { device, data } = g
+  // 记录设备**自报的属地**与库中值：前者是属地匹配的优先来源（见 dispatcher 第 9 条），
+  // 两者不一致说明发生了「被动换 IP」或心跳滞后 —— 这正是过去导致 ip_mismatch 白跑的情形，
+  // 没有这行日志就只能看到 `no_post_in_city`，完全无法归因。
+  log.info(
+    `claim device=${device.id} claimedCity=${data.ipCity ?? '(none)'} ` +
+      `storedCity=${device.last_ip_city ?? '(none)'}`,
+  )
   // 把请求里带的「领取当下属地」透传给派单：它比 devices.last_ip_city 新
   // （后者最多滞后一个心跳周期），可避免被动换 IP 时的 ip_mismatch 白跑。
   const outcome = await dispatchTo(device.id, data.ipCity)

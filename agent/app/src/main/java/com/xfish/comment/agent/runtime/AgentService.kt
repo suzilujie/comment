@@ -510,9 +510,23 @@ class AgentService : Service() {
 
         val result = IpProbe.probe()
         if (result != null) {
-            probeCache = result
-            probeCachedAt = now
-            Prefs.saveIp(this, result.ip, result.region)
+            // ⚠ 只有**带属地**的结果才进缓存。
+            //
+            // 「仅 IP、无属地」是兜底端点的产物（如 3322 只回纯 IP）。属地是派单的**硬匹配
+            // 条件**，而 ensureProbe 只在 force 时重探 —— 一旦把空属地结果缓存 5 分钟，
+            // 领取循环就会整整 5 分钟反复判「属地未就绪」却不再探测，网络早已恢复也接不上
+            // （实测：主端点被 Cloudflare 拦截 + 兜底端点只回 IP → 设备长时间空转）。
+            // 不缓存 → `fresh` 保持 false → 下一轮（30 秒后）立即重探，自愈时间从 5 分钟降到 30 秒。
+            if (result.region.isNotBlank()) {
+                probeCache = result
+                probeCachedAt = now
+                Prefs.saveIp(this, result.ip, result.region)
+            } else {
+                Log.w(
+                    TAG,
+                    "探测到 IP=${result.ip} 但无属地（via ${result.source}），不缓存，30 秒后重探",
+                )
+            }
         }
         return result
     }

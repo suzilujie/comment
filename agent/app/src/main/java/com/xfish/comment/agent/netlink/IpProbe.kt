@@ -145,7 +145,13 @@ object IpProbe {
     private fun httpGet(url: String, c: OkHttpClient = client): String? {
         val req = Request.Builder().url(url).get().build()
         c.newCall(req).execute().use { resp ->
-            if (!resp.isSuccessful) return null
+            if (!resp.isSuccessful) {
+                // ⚠ 早期这里静默 `return null`：主端点被限流（429）或被 WAF 拦截（403）时
+                // 日志里**一行都看不到** —— 只能看到兜底端点"成功"却属地为空，定位极难。
+                // 实测 ipapi.co 会返回 Cloudflare 人机验证页（403），必须留下痕迹。
+                Log.w(TAG, "http ${resp.code} ← $url")
+                return null
+            }
             return resp.body?.string()
         }
     }
