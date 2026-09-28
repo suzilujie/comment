@@ -1,6 +1,7 @@
 package com.xfish.comment.agent.exec
 
 import android.content.Context
+import android.graphics.Rect
 import android.net.Uri
 import com.xfish.comment.agent.accessibility.Actions
 import com.xfish.comment.agent.accessibility.AutoService
@@ -140,21 +141,19 @@ object TaskExecutor {
             dao.markStarted(task.taskId, LocalState.RUNNING, Time.nowMs())
 
             // ── 步骤 4：素材准备（仅图文评论）──
+            // ⚠ 这里**只下载/缓存**，**写相册推迟到步骤 8.6（贴图前一刻）**。
+            //    原因见 attachCommentImage 的注释：相册选择器只能按位置选图（第一格 = 最新一张），
+            //    "写入相册"与"点选"之间的时间窗越短，期间新增照片导致选错图的概率越低。
+            //    下载放在这里是为了**早失败、便宜失败** —— 此刻还没碰抖音。
             if (task.commentType == "image") {
                 val image = task.image
                 if (image == null) {
                     Log.w(TAG, "任务为图文形态但未携带图片")
                     return finish(Outcome("aborted", Config.Reason.ELEMENT_MISSING, "image_missing", startedAt = startedAt), task, reporter)
                 }
-                val local = MaterialStore.ensureCached(context, image)
-                if (local == null) {
+                if (MaterialStore.ensureCached(context, image) == null) {
                     return finish(Outcome("failed", Config.Reason.NETWORK, "material_download_failed", startedAt = startedAt), task, reporter)
                 }
-                val uri = MaterialStore.publishToAlbum(context, local, "agent_${image.hash}.jpg")
-                if (uri == null) {
-                    return finish(Outcome("failed", Config.Reason.ELEMENT_MISSING, "album_write_failed", startedAt = startedAt), task, reporter)
-                }
-                albumUris += uri
             }
 
             // ── 步骤 5：唤起抖音 + 短链直达帖子 ──
@@ -284,6 +283,18 @@ object TaskExecutor {
             // 因此把可读的「评论数」作为提交成功的第二判据（发送后 +1）。
             val commentCountBefore = readCommentCount()
             Log.i(TAG, "发送前评论数基线=$commentCountBefore")
+
+            // ── 步骤 8.6：图文评论 → 贴图（**发送前必须完成**）──
+            // 顺序刻意是"先贴图、再打字"：抖音的相册是「单击即选中并返回」，返回后编辑框
+            // 自动展开、键盘弹起，正好接着走步骤 9 输入话术。
+            // 失败一律按 **aborted**：此刻还没点发送 → 确认未发出、可退配额。
+            // ⚠ 绝不能"贴图失败就退回发纯文字" —— 后台会把它记成图文评论，统计上 1/4 配比
+            //    看似完成，实际一条图都没带（这正是改造前的状态）。
+            if (task.commentType == "image") {
+                attachCommentImage(context, task, albumUris, startedAt)?.let {
+                    return finish(it, task, reporter)
+                }
+            }
 
             // ── 步骤 9：输入话术（剪贴板 + 粘贴）──
             val inputEntry = NodeFinder.waitFor(DouyinLocators.commentInputEntry, timeoutMs = 5_000)
@@ -444,6 +455,123 @@ object TaskExecutor {
             }
         }
     }
+
+    // ── 图文评论：贴图 ────────────────────────────────────────
+
+    /**
+     * 把素材图片贴到评论上（**只在 commentType == "image" 时调用**）。
+     *
+     * 三步：写相册 → 点「插入图片」→ 在相册里选第一格 → 校验缩略图出现。
+     *
+     * ⚠ 为什么必须「刚写完相册就马上选」：
+     *   抖音相册选择器（`MvChoosePhotoActivity`）里的照片格**没有任何可识别特征** ——
+     *   contentDescription 是系统拼出来的「, 点按两次即可激活」，resource-id 是混淆过的
+     *   `rv5`，也不能按文件名搜。所以只能按**位置**选：树序第一个格子 = 相册里最新的一张。
+     *
+     *   于是"我们写入的那张图是不是最新"就成了**唯一**的正确性前提。早期实现是在步骤 4
+     *   （刚领到任务时）就写相册，中间隔着打开抖音、浏览、点赞、读评论近两分钟 —— 这期间
+     *   任何新增照片都会让我们选错，把**别人的私人照片**当评论配图发出去，而且**不可撤销**。
+     *   所以这里刻意在点按钮之前才写相册，把时间窗压到几秒。
+     *
+     *   更彻底的做法是申请 `READ_MEDIA_IMAGES` 后断言「相册最新一张 == 本任务素材」；
+     *   当前 App 没有媒体读取权限（只能看到自己写入的条目），做不了这个断言，
+     *   因此用"极短时间窗 + 缩略图事后校验"兜底。
+     *
+     * @return null 表示贴图成功；非 null 为应当中止的终态
+     */
+    private suspend fun attachCommentImage(
+        context: Context,
+        task: TaskPackageDto,
+        albumUris: MutableList<Uri>,
+        startedAt: Long,
+    ): Outcome? {
+        val image = task.image ?: return Outcome(
+            "aborted", Config.Reason.ELEMENT_MISSING, "image_missing", startedAt = startedAt,
+        )
+        val local = MaterialStore.ensureCached(context, image)
+            ?: return Outcome("failed", Config.Reason.NETWORK, "material_download_failed", startedAt = startedAt)
+        // 此刻才写相册：让这张图成为相册里"最新的一张"
+        val uri = MaterialStore.publishToAlbum(context, local, "agent_${image.hash}.jpg")
+            ?: return Outcome("failed", Config.Reason.ELEMENT_MISSING, "album_write_failed", startedAt = startedAt)
+        albumUris += uri
+
+        // ① 点「插入图片」
+        Human.reactBeforeClick(context)
+        val entry = NodeFinder.waitFor(DouyinLocators.insertImageButton, timeoutMs = 4_000)
+            ?: run {
+                logPageDump("未找到「插入图片」入口")
+                return Outcome(
+                    "aborted", Config.Reason.IMAGE_ATTACH_FAILED, "insert_image_entry_missing",
+                    startedAt = startedAt,
+                )
+            }
+        if (!Actions.click(entry)) {
+            logPageDump("「插入图片」点击失败")
+            return Outcome(
+                "aborted", Config.Reason.IMAGE_ATTACH_FAILED, "insert_image_click_failed",
+                startedAt = startedAt,
+            )
+        }
+
+        // ② 等相册就绪，并**严格取树序第一个**照片格（= 最新一张）
+        //    位置约束（top >= ALBUM_GRID_TOP）把标题/搜索框/分类按钮排除在外，
+        //    避免"第一个含该提示的节点"其实是网格外的某个图标。
+        val cell = NodeFinder.waitForFirstWhere(timeoutMs = 10_000) { n ->
+            val d = n.contentDescription?.toString().orEmpty()
+            val r = Rect().also { n.getBoundsInScreen(it) }
+            d.contains(DouyinLocators.ALBUM_CELL_HINT) && r.top >= DouyinLocators.ALBUM_GRID_TOP
+        }
+        if (cell == null) {
+            logPageDump("相册选择器未就绪（未找到照片格）")
+            return Outcome(
+                "aborted", Config.Reason.IMAGE_ATTACH_FAILED, "album_not_opened", startedAt = startedAt,
+            )
+        }
+
+        // ③ 选中（抖音相册是单击即选中并返回，没有"完成"按钮）
+        Human.pause(600, 1_400)
+        if (!Actions.click(cell)) {
+            logPageDump("相册照片格点击失败")
+            return Outcome(
+                "aborted", Config.Reason.IMAGE_ATTACH_FAILED, "album_pick_failed", startedAt = startedAt,
+            )
+        }
+
+        // ④ 校验：缩略图 / 「同时发布为作品」出现，才算真的贴上了
+        if (NodeFinder.waitFor(DouyinLocators.commentImageAttached, timeoutMs = 8_000) == null) {
+            logPageDump("贴图后未出现缩略图")
+            return Outcome(
+                "aborted", Config.Reason.IMAGE_ATTACH_FAILED, "image_not_attached", startedAt = startedAt,
+            )
+        }
+        // ⑤ 收起表情面板，切回键盘。
+        //    贴图后抖音停在**表情面板展开态**，该状态下输入框既不响应 ACTION_PASTE，
+        //    长按也弹不出「粘贴」菜单（实测：任务 100% 卡在 input_failed）。
+        //    ⚠ 「表情」是**开关**：面板已关时点它反而会打开，所以必须先判断再点。
+        if (isEmojiPanelOpen()) {
+            NodeFinder.find(DouyinLocators.emojiPanelToggle)?.let {
+                Actions.click(it)
+                delay(Rnd.long(500, 900))
+                Log.i(TAG, "已收起表情面板，切回键盘")
+            }
+        }
+        Log.i(TAG, "✅ 已贴图：素材=${image.hash} 相册条目=$uri")
+        return null
+    }
+
+    /**
+     * 表情面板是否展开。
+     *
+     * 判据：评论工具栏下方（y > 1350）存在 contentDescription 形如 `[呲牙]` 的表情格。
+     * 刻意**不用 resource-id** —— 抖音的 id 是混淆过的（本次实测为 `h9q`），换版本即失效；
+     * 而「表情格的描述是 `[xx]`」这个形状要稳定得多。
+     */
+    private fun isEmojiPanelOpen(): Boolean =
+        NodeFinder.findFirstWhere { n ->
+            val d = n.contentDescription?.toString().orEmpty()
+            val r = Rect().also { n.getBoundsInScreen(it) }
+            d.length in 3..8 && d.startsWith("[") && d.endsWith("]") && r.top > 1350
+        } != null
 
     // ── 内部工具 ──────────────────────────────────────────────
 

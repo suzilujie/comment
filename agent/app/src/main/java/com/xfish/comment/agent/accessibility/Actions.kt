@@ -173,16 +173,36 @@ object Actions {
         return dispatch(stroke)
     }
 
-    /** 找到当前聚焦或可编辑的输入框 */
+    /**
+     * 找到当前聚焦或可编辑的输入框。
+     *
+     * ⚠ 必须「先收集、再按优先级挑」，不能「遍历遇到的第一个就返回」。
+     *   图文评论**贴图之后**，页面上会同时存在**两个 id 相同的 EditText**：
+     *     · 折叠态底栏那个（贴在屏幕最下沿，只剩几像素高）
+     *     · 展开态的编辑框本身（真正要输入的那个）
+     *   树序上折叠态在前，于是"第一个可编辑节点"返回的是它 —— `ACTION_PASTE` 被拒、
+     *   长按坐标落在屏幕底边（实测 388,2259），粘贴菜单**永远弹不出来**，
+     *   贴图任务 100% 卡在 `input_failed`。
+     *
+     *   优先级：**已聚焦** > 尺寸正常的可编辑框（宽≥100 高≥40）> 其它。
+     */
     fun findFocusedEditable(): AccessibilityNodeInfo? {
         val root = AutoService.root() ?: return null
-        var hit: AccessibilityNodeInfo? = null
+        val focused = ArrayList<AccessibilityNodeInfo>(2)
+        val visible = ArrayList<AccessibilityNodeInfo>(2)
+        val rest = ArrayList<AccessibilityNodeInfo>(2)
 
         fun dfs(node: AccessibilityNodeInfo, depth: Int) {
-            if (hit != null || depth > 25) return
-            if (node.isEditable || node.isFocused && node.className?.contains("EditText", true) == true) {
-                hit = node
-                return
+            if (depth > 25) return
+            val isEdit = node.isEditable ||
+                (node.isFocused && node.className?.contains("EditText", true) == true)
+            if (isEdit) {
+                val r = Rect().also { node.getBoundsInScreen(it) }
+                when {
+                    node.isFocused -> focused.add(node)
+                    r.width() >= 100 && r.height() >= 40 -> visible.add(node)
+                    else -> rest.add(node)
+                }
             }
             for (i in 0 until node.childCount) {
                 val c = node.getChild(i) ?: continue
@@ -190,7 +210,7 @@ object Actions {
             }
         }
         dfs(root, 0)
-        return hit
+        return focused.firstOrNull() ?: visible.firstOrNull() ?: rest.firstOrNull()
     }
 
     // ── 应用与链接 ───────────────────────────────────────────

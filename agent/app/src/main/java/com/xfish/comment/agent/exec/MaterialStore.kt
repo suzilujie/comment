@@ -83,6 +83,11 @@ object MaterialStore {
             val values = ContentValues().apply {
                 put(MediaStore.Images.Media.DISPLAY_NAME, displayName)
                 put(MediaStore.Images.Media.MIME_TYPE, "image/jpeg")
+                // ⚠ 必须显式写 DATE_TAKEN：只靠 MediaStore 自动填的 DATE_ADDED 不够。
+                //    相册类 App 有的按「添加时间」排、有的按「拍摄时间」排，而新插入条目的
+                //    DATE_TAKEN 为空 —— 在后者里会沉到列表底部。而贴图链路是「选相册第一格」
+                //    （照片格没有任何可识别特征，只能按位置选），排序一旦不一致就会选错图。
+                put(MediaStore.Images.Media.DATE_TAKEN, System.currentTimeMillis())
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                     put(MediaStore.Images.Media.RELATIVE_PATH, "${Environment.DIRECTORY_PICTURES}/$ALBUM_DIR")
                     put(MediaStore.Images.Media.IS_PENDING, 1)

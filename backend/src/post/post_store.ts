@@ -120,12 +120,15 @@ export async function pickUnusedImage(
 /**
  * 决定本次评论形态：图文 1/4 配比。
  * 已发出的图文占比低于 1/4 时，本次用图文；否则纯文字。
+ *
+ * ⚠ **与帖子类型无关**。早期版本签名为 `(postId, isImagePost)`，并在
+ * `!isImagePost` 时直接 `return 'text'` —— 那等于给视频帖判了"永远纯文字"，
+ * 与需求「每帖图文 1/4」不符（视频帖同样可以发图文评论）。
+ *
+ * 注：派单主路径已把这段逻辑内联进 `findDispatchablePost` 的 SQL（200 台规模优化），
+ * 本函数保留作为**口径参考**与单点复算。
  */
-export async function decideCommentType(
-  postId: string,
-  isImagePost: boolean,
-): Promise<'text' | 'image'> {
-  if (!isImagePost) return 'text'
+export async function decideCommentType(postId: string): Promise<'text' | 'image'> {
   const [committed, imageCount] = await Promise.all([
     countPostCommitted(postId),
     countPostImageComments(postId),
@@ -213,10 +216,9 @@ export async function findDispatchablePost(
     SELECT c.id, c.url, c.post_type,
            sc.id AS script_id, sc.text AS script_text,
            im.hash AS image_hash, im.path AS image_path,
-           (
-             c.post_type = 'image'
-             AND c.image_count < GREATEST(1, ROUND((c.committed + 1)::numeric / 4))
-           ) AS need_image
+          (
+            c.image_count < GREATEST(1, ROUND((c.committed + 1)::numeric / 4))
+          ) AS need_image
     FROM candidate c
     LEFT JOIN LATERAL (
       SELECT s.id, s.text FROM scripts s
@@ -282,9 +284,13 @@ export async function diagnoseNoCandidate(
               AND NOT EXISTS (SELECT 1 FROM post_material_usage u
                               WHERE u.post_id = p.id AND u.material_ref = 'script:' || s.id)
           )
-          -- 或：图文帖却没有可用图片
+          -- 或：这一条本该配图（1/4 配比还没满足），却没有任何可用图片。
+          -- ⚠ 不能按 post_type='image' 判断：配比与帖子类型无关，视频帖同样要配图。
           OR (
-            p.post_type = 'image'
+            (SELECT COUNT(*) FROM tasks t3
+              WHERE t3.post_id = p.id AND t3.comment_type = 'image'
+                AND t3.status IN ('succeeded', 'dispatched', 'executing'))
+              < GREATEST(1, ROUND((p.committed + 1)::numeric / 4))
             AND NOT EXISTS (
               SELECT 1 FROM materials m
               WHERE m.enabled = TRUE

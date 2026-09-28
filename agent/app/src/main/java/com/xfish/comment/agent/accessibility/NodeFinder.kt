@@ -112,6 +112,42 @@ object NodeFinder {
         return null
     }
 
+    /**
+     * 等待**树序遍历的第一个**满足 [predicate] 的节点。
+     *
+     * 与 [waitFor] 的区别：`waitFor` 走定位链（文本 → 描述 → viewId → 类名），返回的是
+     * 「某一级里第一个命中」，无法表达「严格取树序第一个」；而**相册按位置选图**
+     * 恰好要求这一点（树序第一个格子 = 相册里最新的一张，见 TaskExecutor 的贴图步骤），
+     * 判据还要同时看描述与坐标，用定位链表达不了。
+     */
+    suspend fun waitForFirstWhere(
+        timeoutMs: Long = 6_000,
+        intervalMs: Long = 250,
+        predicate: (AccessibilityNodeInfo) -> Boolean,
+    ): AccessibilityNodeInfo? {
+        val deadline = Time.elapsedMs() + timeoutMs
+        while (Time.elapsedMs() < deadline) {
+            findFirstWhere(predicate)?.let { return it }
+            delay(intervalMs)
+        }
+        return null
+    }
+
+    /** 取树序遍历的第一个满足 [predicate] 的节点（单次全树遍历，命中即停） */
+    fun findFirstWhere(predicate: (AccessibilityNodeInfo) -> Boolean): AccessibilityNodeInfo? {
+        val root = AutoService.root() ?: return null
+        var hit: AccessibilityNodeInfo? = null
+        walk(root, 0, 30) { node ->
+            if (predicate(node)) {
+                hit = node
+                false
+            } else {
+                true
+            }
+        }
+        return hit
+    }
+
     /** 等待某段文本出现（用于提交后校验、弹窗识别）；同样按单调时钟计时 */
     suspend fun waitForTextContains(keyword: String, timeoutMs: Long = 8_000, intervalMs: Long = 300): Boolean {
         val deadline = Time.elapsedMs() + timeoutMs

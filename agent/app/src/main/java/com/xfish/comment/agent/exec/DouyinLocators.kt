@@ -52,6 +52,63 @@ object DouyinLocators {
         descContains = listOf("发送"),
     )
 
+    /**
+     * 「表情」开关（工具栏里那个）。
+     *
+     * 用途：贴图后抖音会停在**表情面板展开态**，此时输入框不响应 `ACTION_PASTE` 与长按，
+     * 必须先点它切回键盘（见 TaskExecutor.attachCommentImage 第 ⑤ 步）。
+     * ⚠ 它是**开关**：面板已关时点它反而会打开，所以调用方必须先判断 [emojiPanelOpen]。
+     */
+    val emojiPanelToggle = NodeFinder.Locator(
+        descContains = listOf("表情"),
+        textExact = listOf("表情"),
+    )
+
+    // ── 图文评论的贴图链路（2026-09-28 真机实测 抖音 39.7.0 / Redmi K30）──
+    //  评论输入栏：EditText(id:ety) | **插入图片(iv_image)** | at | 表情
+    //  点「插入图片」→ 打开抖音自带相册 MvChoosePhotoActivity（标题「所有照片」）
+
+    /** 评论输入栏的「插入图片」入口（折叠态与展开态都在同一位置） */
+    val insertImageButton = NodeFinder.Locator(
+        descContains = listOf("插入图片"),
+        viewIds = listOf("com.ss.android.ugc.aweme:id/iv_image"),
+    )
+
+    /** 相册选择器已就绪（标题「所有照片」，或照片网格出现） */
+    val albumPickerReady = NodeFinder.Locator(
+        textContains = listOf("所有照片"),
+        viewIds = listOf("com.ss.android.ugc.aweme:id/rv5"),
+    )
+
+    /**
+     * 相册里的照片格提示文案。
+     *
+     * ⚠ 照片格**没有任何业务特征**：contentDescription 由系统拼成 ", 点按两次即可激活"
+     *   （未命名的 ImageView），resource-id 是混淆过的 `rv5`。所以只能靠「位置」
+     *   选图 —— 树序遍历的第一个格子就是相册里最新的一张。见 TaskExecutor.attachCommentImage。
+     */
+    const val ALBUM_CELL_HINT = "点按两次即可激活"
+
+    /** 照片网格的纵向起点：标题/搜索框/分类按钮都在其上方，用它把匹配限制在网格内 */
+    const val ALBUM_GRID_TOP = 450
+
+    /**
+     * 「图片已挂到评论上」的证据。
+     *
+     * 真机实测（附图后）：编辑框内出现缩略图与其删除按钮(id:evs, desc="关闭")，
+     * 下方出现「同时发布为作品」。二选一命中即视为贴图成功 ——
+     * 这是**发送前**的最后一道校验：没贴上图就绝不能发（否则后台会把它记成图文评论）。
+     *
+     * ⚠ 曾把缩略图本体 `id:evr` 也列为判据，实测**会误判**：详情页右侧「评论N」按钮
+     *   内部那个图标同样是 `evr`（[944,1472]，节点还在 `LinearLayout id:e1j` 里）——
+     *   也就是说贴图**完全失败**时这条判据照样命中，"已贴图"变成永远为真。
+     *   只保留有区分度的两项（实测：详情页 0 个 / 贴图态各 1 个）。
+     */
+    val commentImageAttached = NodeFinder.Locator(
+        textContains = listOf("同时发布为作品"),
+        viewIds = listOf("com.ss.android.ugc.aweme:id/evs"),
+    )
+
     /** 点赞（未点赞态） */
     val likeButton = NodeFinder.Locator(
         descContains = listOf("点赞", "喜欢"),

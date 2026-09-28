@@ -114,6 +114,8 @@ object Config {
         const val ELEMENT_MISSING = "element_missing"
         const val INPUT_FAILED = "input_failed"
         const val SUBMIT_FAILED = "submit_failed"
+        /** 图文评论：图片没能贴到评论上（**未发送**，按 aborted 上报，可退配额） */
+        const val IMAGE_ATTACH_FAILED = "image_attach_failed"
         const val VERIFY_FAILED = "verify_failed"
         const val RATE_LIMITED = "rate_limited"
         const val CAPTCHA = "captcha"

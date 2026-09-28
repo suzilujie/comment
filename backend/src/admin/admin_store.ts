@@ -158,12 +158,18 @@ function postBaseSelect() {
             AND NOT EXISTS (SELECT 1 FROM post_material_usage u
                             WHERE u.post_id = p.id AND u.material_ref = 'script:' || s.id)
         ) THEN '话术已用尽'
-        WHEN p.post_type = 'image' AND NOT EXISTS (
-          SELECT 1 FROM materials m
-          WHERE m.enabled = TRUE
-            AND NOT EXISTS (SELECT 1 FROM post_material_usage u
-                            WHERE u.post_id = p.id AND u.material_ref = 'image:' || m.hash)
-        ) THEN '图文帖缺图片'
+        -- 本条本该配图（1/4 配比未满足）却没有可用图片。
+        -- ⚠ 与帖子类型无关：视频帖同样要配图文评论，早期按 post_type='image' 判断是错的。
+        WHEN (SELECT COUNT(*) FROM tasks t
+                WHERE t.post_id = p.id AND t.comment_type = 'image'
+                  AND t.status IN ('succeeded', 'dispatched', 'executing'))
+             < GREATEST(1, ROUND((p.committed + 1)::numeric / 4))
+          AND NOT EXISTS (
+            SELECT 1 FROM materials m
+            WHERE m.enabled = TRUE
+              AND NOT EXISTS (SELECT 1 FROM post_material_usage u
+                              WHERE u.post_id = p.id AND u.material_ref = 'image:' || m.hash)
+          ) THEN '缺图片（图文评论无图可用）'
         ELSE NULL
       END AS blocked_reason
     FROM posts p
