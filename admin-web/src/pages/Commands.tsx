@@ -1,5 +1,5 @@
 import { api, fmtTime } from '../api'
-import { Badge, Btn, Card, Empty, ErrorBox, Spinner, Table, Td, useFetch } from '../ui'
+import { Badge, Btn, Card, Empty, ErrorBox, Pager, Spinner, Table, Td, useFetch, usePaging } from '../ui'
 
 interface Props {
   autoMs: number
@@ -30,7 +30,12 @@ const statusTone = (s: string): 'ok' | 'warn' | 'err' | 'info' | 'muted' => {
  * 所以「下发了但一直是 pending」= 设备没在上报心跳（离线或服务未运行）。
  */
 export default function Commands({ autoMs, refreshKey, notify }: Props) {
-  const cmds = useFetch(() => api.commands(), [refreshKey], autoMs)
+  const pg = usePaging()
+  const cmds = useFetch(
+    () => api.commands({ limit: pg.pageSize, offset: pg.offset }),
+    [refreshKey, pg.page, pg.pageSize],
+    autoMs,
+  )
 
   const items = cmds.data?.items ?? []
   const pending = items.filter((c) => c.status === 'pending').length
@@ -76,6 +81,15 @@ export default function Commands({ autoMs, refreshKey, notify }: Props) {
             </tr>
           ))}
         </Table>
+      )}
+      {cmds.data && (
+        <Pager
+          total={cmds.data.total}
+          page={pg.page}
+          pageSize={pg.pageSize}
+          onPage={pg.setPage}
+          onPageSize={pg.setPageSize}
+        />
       )}
     </Card>
   )

@@ -243,6 +243,35 @@ export interface LoginResult {
   expiresInHours: number
 }
 
+// ── 分页 ────────────────────────────────────────────────────
+
+/** 管理台所有列表接口的统一返回：当前页条目 + 总数（用于算总页数） */
+export interface Paged<T> {
+  items: T[]
+  total: number
+}
+
+export interface PageQuery {
+  limit?: number
+  offset?: number
+}
+
+/** 任务列表额外支持状态过滤（须服务端过滤，否则只作用于当前页） */
+export interface TaskQuery extends PageQuery {
+  status?: string
+}
+
+/** 拼查询串；offset 为 0 时省略，保持 URL 干净便于排障 */
+function qs(p?: PageQuery & { status?: string }): string {
+  if (!p) return ''
+  const s = new URLSearchParams()
+  if (p.limit != null) s.set('limit', String(p.limit))
+  if (p.offset != null && p.offset > 0) s.set('offset', String(p.offset))
+  if (p.status) s.set('status', p.status)
+  const t = s.toString()
+  return t ? `?${t}` : ''
+}
+
 export const api = {
   /** 登录成功即写入 token（后续请求自动携带） */
   login: async (username: string, password: string): Promise<LoginResult> => {
@@ -256,11 +285,12 @@ export const api = {
   },
 
   overview: () => req<Overview>('/overview'),
-  devices: () => req<{ items: DeviceItem[]; onlineThresholdSeconds: number }>('/devices'),
-  tasks: (limit = 100) => req<{ items: TaskItem[] }>(`/tasks?limit=${limit}`),
-  unknownTasks: (limit = 50) => req<{ items: TaskItem[] }>(`/unknown-tasks?limit=${limit}`),
-  posts: (limit = 200) => req<{ items: PostItem[] }>(`/posts?limit=${limit}`),
-  events: (limit = 100) => req<{ items: EventItem[] }>(`/events?limit=${limit}`),
+  devices: (p?: PageQuery) =>
+    req<Paged<DeviceItem> & { onlineThresholdSeconds: number }>(`/devices${qs(p)}`),
+  tasks: (p?: TaskQuery) => req<Paged<TaskItem>>(`/tasks${qs(p)}`),
+  unknownTasks: (p?: PageQuery) => req<Paged<TaskItem>>(`/unknown-tasks${qs(p)}`),
+  posts: (p?: PageQuery) => req<Paged<PostItem>>(`/posts${qs(p)}`),
+  events: (p?: PageQuery) => req<Paged<EventItem>>(`/events${qs(p)}`),
 
   resetCounters: (deviceId: string) =>
     req<OpResult>(`/devices/${encodeURIComponent(deviceId)}/reset-counters`, { method: 'POST' }),
@@ -306,7 +336,7 @@ export const api = {
 
   // ── 素材 ──────────────────────────────────────────────────
 
-  materials: () => req<{ items: MaterialItem[] }>('/materials'),
+  materials: (p?: PageQuery) => req<Paged<MaterialItem>>(`/materials${qs(p)}`),
 
   /**
    * 上传素材（multipart）。
@@ -349,7 +379,7 @@ export const api = {
 
   // ── 话术 ──────────────────────────────────────────────────
 
-  scripts: () => req<{ items: ScriptItem[] }>('/scripts'),
+  scripts: (p?: PageQuery) => req<Paged<ScriptItem>>(`/scripts${qs(p)}`),
 
   createScript: (text: string) =>
     req<OpResult>('/scripts', { method: 'POST', body: JSON.stringify({ text }) }),
@@ -369,7 +399,8 @@ export const api = {
    * `availableProvinces` = 尚未入池的**标准**省份名。
    * 用它做下拉，避免手输错别字（池里出现「河北省」会让该省的帖子永远派不出去）。
    */
-  cities: () => req<{ items: CityItem[]; availableProvinces: string[] }>('/city-pools'),
+  cities: (p?: PageQuery) =>
+    req<Paged<CityItem> & { availableProvinces: string[] }>(`/city-pools${qs(p)}`),
 
   /** slug 由后端按省份名推导（PROVINCE_SLUGS），前端不再传 */
   createCity: (city: string) =>
@@ -386,7 +417,7 @@ export const api = {
 
   // ── 设备指令 ──────────────────────────────────────────────
 
-  commands: () => req<{ items: CommandItem[] }>('/commands'),
+  commands: (p?: PageQuery) => req<Paged<CommandItem>>(`/commands${qs(p)}`),
 
   sendCommand: (deviceId: string, kind: CommandKind, payload?: Record<string, unknown>) =>
     req<OpResult>(`/devices/${encodeURIComponent(deviceId)}/commands`, {

@@ -305,10 +305,29 @@ export async function findOverdueTasks(limit = 50): Promise<TaskRow[]> {
   `) as unknown as TaskRow[]
 }
 
-/** 任务列表（看板用） */
-export async function listTasks(limit = 100): Promise<TaskRow[]> {
+/**
+ * 任务列表（看板用；分页：limit + offset）。
+ *
+ * @param status 可选状态过滤。**必须服务端过滤** —— 管理台的「只看 unknown」原本是
+ *   前端 `filter`，一旦加分页就只会过滤当前页，页码与总数全对不上（看起来像"数据丢了"）。
+ */
+export async function listTasks(limit = 100, offset = 0, status?: string): Promise<TaskRow[]> {
   const sql = db()
+  const st = status ?? null
   return (await sql`
-    SELECT * FROM tasks ORDER BY dispatched_at DESC LIMIT ${limit}
+    SELECT * FROM tasks
+    WHERE (${st}::text IS NULL OR status = ${st})
+    ORDER BY dispatched_at DESC LIMIT ${limit} OFFSET ${offset}
   `) as unknown as TaskRow[]
+}
+
+/** 任务总数（管理台分页用）；`status` 口径与 [listTasks] 一致 */
+export async function countTasks(status?: string): Promise<number> {
+  const sql = db()
+  const st = status ?? null
+  const rows = (await sql`
+    SELECT COUNT(*)::int AS n FROM tasks
+    WHERE (${st}::text IS NULL OR status = ${st})
+  `) as unknown as { n: number }[]
+  return rows[0]?.n ?? 0
 }

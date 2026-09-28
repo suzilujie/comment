@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import { api, fmtTime, statusTone } from '../api'
 import type { TaskItem } from '../api'
-import { Badge, Btn, Card, Empty, ErrorBox, Spinner, Table, Td, useFetch } from '../ui'
+import { Badge, Btn, Card, Empty, ErrorBox, Pager, Spinner, Table, Td, useFetch, usePaging } from '../ui'
 
 interface Props {
   autoMs: number
@@ -20,9 +20,21 @@ function duration(task: TaskItem): string {
 
 export default function Tasks({ autoMs, refreshKey, notify }: Props) {
   const [onlyUnknown, setOnlyUnknown] = useState(false)
-  const tasks = useFetch(() => api.tasks(200), [refreshKey, onlyUnknown], autoMs)
+  const pg = usePaging()
+  // ⚠ 状态过滤必须走**服务端**（api.tasks 的 status 参数）：前端 filter 只作用于当前页，
+  //    一加分页就会出现「共 N 条、但只看到几行」的错位显示。
+  const tasks = useFetch(
+    () =>
+      api.tasks({
+        limit: pg.pageSize,
+        offset: pg.offset,
+        status: onlyUnknown ? 'unknown' : undefined,
+      }),
+    [refreshKey, onlyUnknown, pg.page, pg.pageSize],
+    autoMs,
+  )
 
-  const items = (tasks.data?.items ?? []).filter((t) => (onlyUnknown ? t.status === 'unknown' : true))
+  const items = tasks.data?.items ?? []
 
   const resolve = async (taskId: string, verdict: 'succeeded' | 'failed') => {
     const isOk = verdict === 'succeeded'
@@ -51,7 +63,10 @@ export default function Tasks({ autoMs, refreshKey, notify }: Props) {
             <input
               type="checkbox"
               checked={onlyUnknown}
-              onChange={(e) => setOnlyUnknown(e.target.checked)}
+              onChange={(e) => {
+                setOnlyUnknown(e.target.checked)
+                pg.setPage(0) // 换过滤条件必须回第 1 页，否则可能停在一个越界页码上
+              }}
               className="h-3.5 w-3.5 accent-amber-500"
             />
             仅看 unknown
@@ -124,6 +139,15 @@ export default function Tasks({ autoMs, refreshKey, notify }: Props) {
             </tr>
           ))}
         </Table>
+      )}
+      {tasks.data && (
+        <Pager
+          total={tasks.data.total}
+          page={pg.page}
+          pageSize={pg.pageSize}
+          onPage={pg.setPage}
+          onPageSize={pg.setPageSize}
+        />
       )}
     </Card>
   )

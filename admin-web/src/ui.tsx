@@ -287,3 +287,87 @@ export function Field({ label, children }: { label: string; children: ReactNode 
     </div>
   )
 }
+
+// ── 分页 ────────────────────────────────────────────────────
+
+/**
+ * 列表分页状态。
+ *
+ * 约定 `page` 从 **0** 开始；**改每页条数时自动回到第一页** ——
+ * 否则会停在一个越界的页码上，看起来就像"数据没了"。
+ */
+export function usePaging(defaultSize = 20) {
+  const [page, setPage] = useState(0)
+  const [pageSize, setPageSizeRaw] = useState(defaultSize)
+  const setPageSize = useCallback((n: number) => {
+    setPageSizeRaw(n)
+    setPage(0)
+  }, [])
+  return { page, pageSize, setPage, setPageSize, offset: page * pageSize }
+}
+
+const PAGE_SIZES = [10, 20, 50, 100]
+
+/**
+ * 分页条：总数 / 当前区间 / 每页条数 / 翻页。
+ *
+ * 总数为 0 时**不渲染**（空列表已经有 Empty 提示，再显示"共 0 条"是噪音）。
+ * 页码越界时按夹住后的值显示与禁用 —— 删除数据后 `page` 可能指向不存在的页。
+ */
+export function Pager({
+  total,
+  page,
+  pageSize,
+  onPage,
+  onPageSize,
+}: {
+  total: number
+  page: number
+  pageSize: number
+  onPage: (p: number) => void
+  onPageSize: (n: number) => void
+}) {
+  if (total === 0) return null
+  const pages = Math.max(1, Math.ceil(total / pageSize))
+  const cur = Math.min(Math.max(0, page), pages - 1)
+  const from = cur * pageSize + 1
+  const to = Math.min(total, (cur + 1) * pageSize)
+  return (
+    <div className="mt-3 flex flex-wrap items-center justify-between gap-3 border-t border-slate-800 pt-3 text-[11px] text-slate-500">
+      <div>
+        共 <span className="tabular-nums text-slate-300">{total}</span> 条 · 当前{' '}
+        <span className="tabular-nums text-slate-300">
+          {from}–{to}
+        </span>
+      </div>
+      <div className="flex items-center gap-1.5">
+        <select
+          value={pageSize}
+          onChange={(e) => onPageSize(Number(e.target.value))}
+          className="rounded-md border border-slate-700 bg-slate-900 px-1.5 py-1 text-[11px] text-slate-300 outline-none focus:border-sky-600"
+        >
+          {PAGE_SIZES.map((n) => (
+            <option key={n} value={n}>
+              {n} 条/页
+            </option>
+          ))}
+        </select>
+        <Btn small onClick={() => onPage(0)} disabled={cur <= 0} title="第一页">
+          «
+        </Btn>
+        <Btn small onClick={() => onPage(cur - 1)} disabled={cur <= 0}>
+          上一页
+        </Btn>
+        <span className="px-1 tabular-nums text-slate-400">
+          {cur + 1} / {pages}
+        </span>
+        <Btn small onClick={() => onPage(cur + 1)} disabled={cur >= pages - 1}>
+          下一页
+        </Btn>
+        <Btn small onClick={() => onPage(pages - 1)} disabled={cur >= pages - 1} title="最后一页">
+          »
+        </Btn>
+      </div>
+    </div>
+  )
+}

@@ -1,6 +1,5 @@
-import { useState } from 'react'
 import { api, fmtTime, statusTone } from '../api'
-import { Badge, Btn, Card, Empty, ErrorBox, Spinner, Table, Td, useFetch } from '../ui'
+import { Badge, Btn, Card, Empty, ErrorBox, Pager, Spinner, Table, Td, useFetch, usePaging } from '../ui'
 
 interface Props {
   autoMs: number
@@ -20,9 +19,15 @@ function detailText(detail: unknown): string {
   }
 }
 
-export default function Events({ autoMs, refreshKey, notify }: Props) {
-  const [limit, setLimit] = useState(100)
-  const events = useFetch(() => api.events(limit), [refreshKey, limit], autoMs)
+export default function Events({ autoMs, refreshKey }: Props) {
+  // 原来的「最近 50/100/200/500 条」下拉被分页条取代：它本质上就是"每页条数"，
+  // 而且只能看前 N 条、更早的事件永远看不到。
+  const pg = usePaging()
+  const events = useFetch(
+    () => api.events({ limit: pg.pageSize, offset: pg.offset }),
+    [refreshKey, pg.page, pg.pageSize],
+    autoMs,
+  )
 
   return (
     <Card
@@ -30,17 +35,6 @@ export default function Events({ autoMs, refreshKey, notify }: Props) {
       subtitle="task_events 追加写、永不修改；actor = manual 的记录来自本管理台的人工操作"
       actions={
         <>
-          <select
-            value={limit}
-            onChange={(e) => setLimit(Number(e.target.value))}
-            className="rounded-md border border-slate-700 bg-slate-800 px-2 py-1 text-xs text-slate-200"
-          >
-            {[50, 100, 200, 500].map((n) => (
-              <option key={n} value={n}>
-                最近 {n} 条
-              </option>
-            ))}
-          </select>
           <Btn onClick={events.reload} disabled={events.loading}>
             刷新
           </Btn>
@@ -90,6 +84,15 @@ export default function Events({ autoMs, refreshKey, notify }: Props) {
             )
           })}
         </Table>
+      )}
+      {events.data && (
+        <Pager
+          total={events.data.total}
+          page={pg.page}
+          pageSize={pg.pageSize}
+          onPage={pg.setPage}
+          onPageSize={pg.setPageSize}
+        />
       )}
     </Card>
   )

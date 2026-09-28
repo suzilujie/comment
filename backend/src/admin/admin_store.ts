@@ -114,7 +114,7 @@ export interface AdminPostRow {
 }
 
 /** 帖子池 + 统计（管理台首屏要看"为什么领不到"） */
-export async function listPostsWithStats(limit = 200): Promise<AdminPostRow[]> {
+export async function listPostsWithStats(limit = 200, offset = 0): Promise<AdminPostRow[]> {
   const sql = db()
   const today = localDateKey()
   return (await sql`
@@ -152,8 +152,15 @@ export async function listPostsWithStats(limit = 200): Promise<AdminPostRow[]> {
     ORDER BY
       CASE p.status WHEN 'active' THEN 0 WHEN 'paused' THEN 1 ELSE 2 END,
       p.city, p.id
-    LIMIT ${limit}
+    LIMIT ${limit} OFFSET ${offset}
   `) as unknown as AdminPostRow[]
+}
+
+/** 帖子总数（管理台分页用） */
+export async function countPosts(): Promise<number> {
+  const sql = db()
+  const rows = (await sql`SELECT COUNT(*)::int AS n FROM posts`) as unknown as { n: number }[]
+  return rows[0]?.n ?? 0
 }
 
 export interface AdminTaskEventRow {
@@ -171,7 +178,7 @@ export interface AdminTaskEventRow {
 }
 
 /** 事件流（含任务快照，用于一眼看出 unknown 及其 evidence） */
-export async function listTaskEvents(limit = 100): Promise<AdminTaskEventRow[]> {
+export async function listTaskEvents(limit = 100, offset = 0): Promise<AdminTaskEventRow[]> {
   const sql = db()
   return (await sql`
     SELECT e.id, e.task_id, e.event, e.actor, e.reason_code, e.detail, e.created_at,
@@ -179,18 +186,34 @@ export async function listTaskEvents(limit = 100): Promise<AdminTaskEventRow[]> 
     FROM task_events e
     LEFT JOIN tasks t ON t.id = e.task_id
     ORDER BY e.id DESC
-    LIMIT ${limit}
+    LIMIT ${limit} OFFSET ${offset}
   `) as unknown as AdminTaskEventRow[]
 }
 
+/** 任务事件总数（管理台分页用） */
+export async function countTaskEvents(): Promise<number> {
+  const sql = db()
+  const rows = (await sql`SELECT COUNT(*)::int AS n FROM task_events`) as unknown as { n: number }[]
+  return rows[0]?.n ?? 0
+}
+
 /** unknown 任务清单（待人工确认，管理台的核心待办列表） */
-export async function listUnknownTasks(limit = 50): Promise<Record<string, unknown>[]> {
+export async function listUnknownTasks(limit = 50, offset = 0): Promise<Record<string, unknown>[]> {
   const sql = db()
   return (await sql`
     SELECT id, device_id, post_id, dispatched_at, finished_at, reason_code, evidence
     FROM tasks WHERE status = 'unknown'
-    ORDER BY dispatched_at DESC LIMIT ${limit}
+    ORDER BY dispatched_at DESC LIMIT ${limit} OFFSET ${offset}
   `) as unknown as Record<string, unknown>[]
+}
+
+/** unknown 任务总数（管理台分页用） */
+export async function countUnknownTasks(): Promise<number> {
+  const sql = db()
+  const rows = (await sql`
+    SELECT COUNT(*)::int AS n FROM tasks WHERE status = 'unknown'
+  `) as unknown as { n: number }[]
+  return rows[0]?.n ?? 0
 }
 
 // ══════════════════════════════════════════════════════════
@@ -448,7 +471,7 @@ export interface AdminMaterialRow {
   used_by_posts: number
 }
 
-export async function listMaterials(): Promise<AdminMaterialRow[]> {
+export async function listMaterials(limit = 500, offset = 0): Promise<AdminMaterialRow[]> {
   const sql = db()
   return (await sql`
     SELECT m.id, m.hash, m.path, m.size_bytes, m.enabled, m.created_at,
@@ -456,7 +479,15 @@ export async function listMaterials(): Promise<AdminMaterialRow[]> {
               WHERE u.material_ref = 'image:' || m.hash) AS used_by_posts
     FROM materials m
     ORDER BY m.created_at DESC
+    LIMIT ${limit} OFFSET ${offset}
   `) as unknown as AdminMaterialRow[]
+}
+
+/** 素材总数（管理台分页用） */
+export async function countMaterials(): Promise<number> {
+  const sql = db()
+  const rows = (await sql`SELECT COUNT(*)::int AS n FROM materials`) as unknown as { n: number }[]
+  return rows[0]?.n ?? 0
 }
 
 /** 登记一张素材（文件由路由层写入磁盘，这里只落库） */
@@ -534,7 +565,7 @@ export interface AdminScriptRow {
   used_by_posts: number
 }
 
-export async function listScripts(): Promise<AdminScriptRow[]> {
+export async function listScripts(limit = 500, offset = 0): Promise<AdminScriptRow[]> {
   const sql = db()
   return (await sql`
     SELECT s.id, s.text, s.enabled, s.created_at,
@@ -542,7 +573,15 @@ export async function listScripts(): Promise<AdminScriptRow[]> {
               WHERE u.material_ref = 'script:' || s.id) AS used_by_posts
     FROM scripts s
     ORDER BY s.created_at DESC
+    LIMIT ${limit} OFFSET ${offset}
   `) as unknown as AdminScriptRow[]
+}
+
+/** 话术总数（管理台分页用） */
+export async function countScripts(): Promise<number> {
+  const sql = db()
+  const rows = (await sql`SELECT COUNT(*)::int AS n FROM scripts`) as unknown as { n: number }[]
+  return rows[0]?.n ?? 0
 }
 
 export async function createScript(text: string): Promise<OpResult> {
@@ -597,13 +636,21 @@ export interface AdminCityRow {
   updated_at: Date
 }
 
-export async function listCitiesAdmin(): Promise<AdminCityRow[]> {
+export async function listCitiesAdmin(limit = 200, offset = 0): Promise<AdminCityRow[]> {
   const sql = db()
   return (await sql`
     SELECT city, slug, active, post_count, remark, updated_at
     FROM city_pools
     ORDER BY active DESC, post_count DESC, city
+    LIMIT ${limit} OFFSET ${offset}
   `) as unknown as AdminCityRow[]
+}
+
+/** 省份池总数（管理台分页用） */
+export async function countCities(): Promise<number> {
+  const sql = db()
+  const rows = (await sql`SELECT COUNT(*)::int AS n FROM city_pools`) as unknown as { n: number }[]
+  return rows[0]?.n ?? 0
 }
 
 /**
@@ -761,13 +808,22 @@ export interface AdminCommandRow {
   result: unknown
 }
 
-/** 最近的指令记录（看是否送达、是否执行成功） */
-export async function listCommands(limit = 50): Promise<AdminCommandRow[]> {
+/** 最近的指令记录（看是否送达、是否执行成功）；分页：limit + offset */
+export async function listCommands(limit = 50, offset = 0): Promise<AdminCommandRow[]> {
   const sql = db()
   return (await sql`
     SELECT id, device_id, kind, status, created_at, delivered_at, finished_at, result
     FROM device_commands
     ORDER BY created_at DESC
-    LIMIT ${limit}
+    LIMIT ${limit} OFFSET ${offset}
   `) as unknown as AdminCommandRow[]
+}
+
+/** 指令总数（管理台分页用） */
+export async function countCommands(): Promise<number> {
+  const sql = db()
+  const rows = (await sql`SELECT COUNT(*)::int AS n FROM device_commands`) as unknown as {
+    n: number
+  }[]
+  return rows[0]?.n ?? 0
 }

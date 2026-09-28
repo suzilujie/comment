@@ -12,10 +12,17 @@ import { mkdirSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { Hono } from 'hono'
 import { config } from '../config.js'
-import { listDevices } from '../device/device_store.js'
-import { listTasks } from '../task/task_store.js'
+import { countDevices, listDevices } from '../device/device_store.js'
+import { countTasks, listTasks } from '../task/task_store.js'
 import { login, tokenOf, verify } from './admin_auth.js'
 import {
+  countCities,
+  countCommands,
+  countMaterials,
+  countPosts,
+  countScripts,
+  countTaskEvents,
+  countUnknownTasks,
   createCity,
   createMaterial,
   createPost,
@@ -64,9 +71,24 @@ admin.use('*', async (c, next) => {
   await next()
 })
 
-function limitOf(raw: string | undefined, fallback: number): number {
-  const n = Number.parseInt(raw ?? '', 10)
-  return Number.isFinite(n) && n > 0 && n <= 1000 ? n : fallback
+/**
+ * 管理台列表的**统一分页口径**。
+ *
+ * · `limit` 夹在 [1, 500]：一次渲染几千行既卡浏览器也没意义，要看全量请翻页；
+ * · `offset` 为负/非法一律按 0 处理（否则 Postgres 会直接报错）；
+ * · 所有列表接口都返回 `total`，前端据此算总页数。
+ */
+function pageOf(
+  q: { limit?: string; offset?: string },
+  defLimit: number,
+  maxLimit = 500,
+): { limit: number; offset: number } {
+  const l = Number.parseInt(q.limit ?? '', 10)
+  const o = Number.parseInt(q.offset ?? '', 10)
+  return {
+    limit: Number.isFinite(l) && l > 0 ? Math.min(l, maxLimit) : defLimit,
+    offset: Number.isFinite(o) && o > 0 ? o : 0,
+  }
 }
 
 // ── 查询 ────────────────────────────────────────────────────
@@ -74,7 +96,8 @@ function limitOf(raw: string | undefined, fallback: number): number {
 admin.get('/overview', async (c) => c.json(await getOverview()))
 
 admin.get('/devices', async (c) => {
-  const items = await listDevices()
+  const { limit, offset } = pageOf(c.req.query(), 20)
+  const [items, total] = await Promise.all([listDevices(limit, offset), countDevices()])
   const now = Date.now()
   return c.json({
     items: items.map((d) => {
@@ -86,42 +109,69 @@ admin.get('/devices', async (c) => {
         lastSeenGapSec: gapSec,
       }
     }),
+    total,
     onlineThresholdSeconds: config.heartbeat.onlineThresholdSeconds,
   })
 })
 
-admin.get('/tasks', async (c) =>
-  c.json({ items: await listTasks(limitOf(c.req.query('limit'), 100)) }),
-)
+admin.get('/tasks', async (c) => {
+  const { limit, offset } = pageOf(c.req.query(), 20)
+  // 状态过滤必须走服务端：前端过滤只会作用于当前页，页码与 total 会全部对不上
+  const status = c.req.query('status') || undefined
+  const [items, total] = await Promise.all([
+    listTasks(limit, offset, status),
+    countTasks(status),
+  ])
+  return c.json({ items, total })
+})
 
-admin.get('/unknown-tasks', async (c) =>
-  c.json({ items: await listUnknownTasks(limitOf(c.req.query('limit'), 50)) }),
-)
+admin.get('/unknown-tasks', async (c) => {
+  const { limit, offset } = pageOf(c.req.query(), 20)
+  const [items, total] = await Promise.all([listUnknownTasks(limit, offset), countUnknownTasks()])
+  return c.json({ items, total })
+})
 
-admin.get('/posts', async (c) =>
-  c.json({ items: await listPostsWithStats(limitOf(c.req.query('limit'), 200)) }),
-)
+admin.get('/posts', async (c) => {
+  const { limit, offset } = pageOf(c.req.query(), 20)
+  const [items, total] = await Promise.all([listPostsWithStats(limit, offset), countPosts()])
+  return c.json({ items, total })
+})
 
-admin.get('/events', async (c) =>
-  c.json({ items: await listTaskEvents(limitOf(c.req.query('limit'), 100)) }),
-)
+admin.get('/events', async (c) => {
+  const { limit, offset } = pageOf(c.req.query(), 20)
+  const [items, total] = await Promise.all([listTaskEvents(limit, offset), countTaskEvents()])
+  return c.json({ items, total })
+})
 
-admin.get('/city-pools', async (c) =>
-  c.json({
-    items: await listCitiesAdmin(),
+admin.get('/city-pools', async (c) => {
+  const { limit, offset } = pageOf(c.req.query(), 20)
+  const [items, total, availableProvinces] = await Promise.all([
+    listCitiesAdmin(limit, offset),
+    countCities(),
     // 尚未入池的标准省份名：前端「新增省份」下拉用它，从源头杜绝手输错别字
     // （池里出现「河北省」这类值，设备上报「河北」将永远匹配不上，且无从归因）
-    availableProvinces: await listAvailableProvinces(),
-  }),
-)
+    listAvailableProvinces(),
+  ])
+  return c.json({ items, total, availableProvinces })
+})
 
-admin.get('/materials', async (c) => c.json({ items: await listMaterials() }))
+admin.get('/materials', async (c) => {
+  const { limit, offset } = pageOf(c.req.query(), 20)
+  const [items, total] = await Promise.all([listMaterials(limit, offset), countMaterials()])
+  return c.json({ items, total })
+})
 
-admin.get('/scripts', async (c) => c.json({ items: await listScripts() }))
+admin.get('/scripts', async (c) => {
+  const { limit, offset } = pageOf(c.req.query(), 20)
+  const [items, total] = await Promise.all([listScripts(limit, offset), countScripts()])
+  return c.json({ items, total })
+})
 
-admin.get('/commands', async (c) =>
-  c.json({ items: await listCommands(limitOf(c.req.query('limit'), 50)) }),
-)
+admin.get('/commands', async (c) => {
+  const { limit, offset } = pageOf(c.req.query(), 20)
+  const [items, total] = await Promise.all([listCommands(limit, offset), countCommands()])
+  return c.json({ items, total })
+})
 
 // ── 写操作（人工把手）────────────────────────────────────────
 

@@ -158,8 +158,8 @@ export async function clearBusy(deviceId: string, taskId: string): Promise<void>
   `
 }
 
-/** 设备列表（看板用） */
-export async function listDevices(limit = 200): Promise<DeviceRow[]> {
+/** 设备列表（看板用；分页：limit + offset） */
+export async function listDevices(limit = 200, offset = 0): Promise<DeviceRow[]> {
   const sql = db()
   return (await sql`
     SELECT id, admin_state, last_seen_at, last_ip, last_ip_city,
@@ -170,6 +170,13 @@ export async function listDevices(limit = 200): Promise<DeviceRow[]> {
            total_success, total_fail, total_unknown
     FROM devices
     ORDER BY last_seen_at DESC NULLS LAST
-    LIMIT ${limit}
+    LIMIT ${limit} OFFSET ${offset}
   `) as unknown as DeviceRow[]
+}
+
+/** 设备总数（管理台分页用） */
+export async function countDevices(): Promise<number> {
+  const sql = db()
+  const rows = (await sql`SELECT COUNT(*)::int AS n FROM devices`) as unknown as { n: number }[]
+  return rows[0]?.n ?? 0
 }

@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { api, fmtTime } from '../api'
-import { Badge, Btn, Card, Empty, ErrorBox, Spinner, Table, Td, useFetch } from '../ui'
+import { Badge, Btn, Card, Empty, ErrorBox, Pager, Spinner, Table, Td, useFetch, usePaging } from '../ui'
 
 interface Props {
   autoMs: number
@@ -16,7 +16,12 @@ interface Props {
  * 能撑起的评论条数越多。
  */
 export default function Scripts({ autoMs, refreshKey, notify }: Props) {
-  const scripts = useFetch(() => api.scripts(), [refreshKey], autoMs)
+  const pg = usePaging()
+  const scripts = useFetch(
+    () => api.scripts({ limit: pg.pageSize, offset: pg.offset }),
+    [refreshKey, pg.page, pg.pageSize],
+    autoMs,
+  )
   const [draft, setDraft] = useState('')
   const [editing, setEditing] = useState<{ id: string; text: string } | null>(null)
 
@@ -160,6 +165,15 @@ export default function Scripts({ autoMs, refreshKey, notify }: Props) {
             </tr>
           ))}
         </Table>
+      )}
+      {scripts.data && (
+        <Pager
+          total={scripts.data.total}
+          page={pg.page}
+          pageSize={pg.pageSize}
+          onPage={pg.setPage}
+          onPageSize={pg.setPageSize}
+        />
       )}
     </Card>
   )

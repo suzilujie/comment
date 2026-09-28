@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { api, fmtTime } from '../api'
-import { Badge, Btn, Card, Empty, ErrorBox, Spinner, Table, Td, useFetch } from '../ui'
+import { Badge, Btn, Card, Empty, ErrorBox, Pager, Spinner, Table, Td, useFetch, usePaging } from '../ui'
 
 interface Props {
   autoMs: number
@@ -19,7 +19,12 @@ interface Props {
  * 注意它**不参与切省** —— 切省用固定组 `city-pool`，省份靠**节点名**匹配。
  */
 export default function Cities({ autoMs, refreshKey, notify }: Props) {
-  const cities = useFetch(() => api.cities(), [refreshKey], autoMs)
+  const pg = usePaging()
+  const cities = useFetch(
+    () => api.cities({ limit: pg.pageSize, offset: pg.offset }),
+    [refreshKey, pg.page, pg.pageSize],
+    autoMs,
+  )
   // 只从「尚未入池的标准省份」里选：省份池是「精确匹配」的另一半，手输「河北省」
   // 这类值会让该省帖子永远派不出去，而症状只是"设备空转"，几乎无法归因。
   const [city, setCity] = useState('')
@@ -146,6 +151,15 @@ export default function Cities({ autoMs, refreshKey, notify }: Props) {
             </tr>
           ))}
         </Table>
+      )}
+      {cities.data && (
+        <Pager
+          total={cities.data.total}
+          page={pg.page}
+          pageSize={pg.pageSize}
+          onPage={pg.setPage}
+          onPageSize={pg.setPageSize}
+        />
       )}
     </Card>
   )

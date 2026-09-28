@@ -1,6 +1,6 @@
 import { api, COMMAND_KINDS, fmtGap, fmtTime } from '../api'
 import type { CommandKind } from '../api'
-import { Badge, Btn, Card, Empty, ErrorBox, Spinner, Table, Td, useFetch } from '../ui'
+import { Badge, Btn, Card, Empty, ErrorBox, Pager, Spinner, Table, Td, useFetch, usePaging } from '../ui'
 
 interface Props {
   autoMs: number
@@ -16,7 +16,12 @@ function PermissionBadge({ label, ok }: { label: string; ok: boolean | null }) {
 }
 
 export default function Devices({ autoMs, refreshKey, notify }: Props) {
-  const dev = useFetch(() => api.devices(), [refreshKey], autoMs)
+  const pg = usePaging()
+  const dev = useFetch(
+    () => api.devices({ limit: pg.pageSize, offset: pg.offset }),
+    [refreshKey, pg.page, pg.pageSize],
+    autoMs,
+  )
 
   const doReset = async (id: string, model: string | null) => {
     const ok = window.confirm(
@@ -169,6 +174,15 @@ export default function Devices({ autoMs, refreshKey, notify }: Props) {
             </tr>
           ))}
         </Table>
+      )}
+      {dev.data && (
+        <Pager
+          total={dev.data.total}
+          page={pg.page}
+          pageSize={pg.pageSize}
+          onPage={pg.setPage}
+          onPageSize={pg.setPageSize}
+        />
       )}
     </Card>
   )

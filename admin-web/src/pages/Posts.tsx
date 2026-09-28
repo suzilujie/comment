@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { api, fmtTime, statusTone } from '../api'
-import { Badge, Btn, Card, Empty, ErrorBox, Spinner, Table, Td, useFetch } from '../ui'
+import { Badge, Btn, Card, Empty, ErrorBox, Pager, Spinner, Table, Td, useFetch, usePaging } from '../ui'
 
 interface Props {
   autoMs: number
@@ -38,11 +38,19 @@ const inputCls =
  * `today_used > 0` 表示今天该帖已被占用过（受「同设备 × 同帖每天一次」限制）。
  */
 export default function Posts({ autoMs, refreshKey, notify }: Props) {
-  const posts = useFetch(() => api.posts(200), [refreshKey], autoMs)
+  const pg = usePaging()
+  const posts = useFetch(
+    () => api.posts({ limit: pg.pageSize, offset: pg.offset }),
+    [refreshKey, pg.page, pg.pageSize],
+    autoMs,
+  )
   // 省份池：属地是**精确匹配**的硬条件 —— 自由文本打错一个字（如「河北省」）帖子就
   // 永远派不出去，而且不会有任何报错，只会在后台表现为「怎么一直没任务」。
   // 不轮询（autoMs 默认 0）：省份池几乎不变，跟着 refreshKey 走即可。
-  const cities = useFetch(() => api.cities(), [refreshKey])
+  //
+  // ⚠ 必须显式要一个大 limit：这是给「省份下拉」供全量选项用的，不是列表页 ——
+  //    用默认分页（20 条）会把省份截断，导致部分省份在下拉里选不到。
+  const cities = useFetch(() => api.cities({ limit: 500 }), [refreshKey])
   const [form, setForm] = useState<FormState | null>(null)
   const [saving, setSaving] = useState(false)
   /** 表单内联「新增省份」的状态（见 addCity） */
@@ -415,6 +423,15 @@ export default function Posts({ autoMs, refreshKey, notify }: Props) {
             )
           })}
         </Table>
+      )}
+      {posts.data && (
+        <Pager
+          total={posts.data.total}
+          page={pg.page}
+          pageSize={pg.pageSize}
+          onPage={pg.setPage}
+          onPageSize={pg.setPageSize}
+        />
       )}
     </Card>
   )

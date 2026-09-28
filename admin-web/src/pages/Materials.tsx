@@ -1,6 +1,6 @@
 import { useRef, useState } from 'react'
 import { api, fmtTime } from '../api'
-import { Badge, Btn, Card, Empty, ErrorBox, Spinner, Table, Td, useFetch } from '../ui'
+import { Badge, Btn, Card, Empty, ErrorBox, Pager, Spinner, Table, Td, useFetch, usePaging } from '../ui'
 
 interface Props {
   autoMs: number
@@ -23,7 +23,12 @@ const fmtSize = (n: number | null): string => {
  * （`/materials/<hash>`），所以上传同一张图会自动去重。
  */
 export default function Materials({ autoMs, refreshKey, notify }: Props) {
-  const mats = useFetch(() => api.materials(), [refreshKey], autoMs)
+  const pg = usePaging()
+  const mats = useFetch(
+    () => api.materials({ limit: pg.pageSize, offset: pg.offset }),
+    [refreshKey, pg.page, pg.pageSize],
+    autoMs,
+  )
   const [uploading, setUploading] = useState(false)
   const fileRef = useRef<HTMLInputElement>(null)
 
@@ -133,6 +138,15 @@ export default function Materials({ autoMs, refreshKey, notify }: Props) {
             </tr>
           ))}
         </Table>
+      )}
+      {mats.data && (
+        <Pager
+          total={mats.data.total}
+          page={pg.page}
+          pageSize={pg.pageSize}
+          onPage={pg.setPage}
+          onPageSize={pg.setPageSize}
+        />
       )}
     </Card>
   )
