@@ -80,6 +80,14 @@ admin.use('*', async (c, next) => {
  * · `offset` 为负/非法一律按 0 处理（否则 Postgres 会直接报错）；
  * · 所有列表接口都返回 `total`，前端据此算总页数。
  */
+/**
+ * 列表默认每页条数。
+ *
+ * ⚠ 必须与前端 `ui.tsx` 的 `DEFAULT_PAGE_SIZE` 保持一致 —— 前端不传 `limit` 时由这里兜底，
+ * 两边不一致会出现"页面上写着 10 条/页，实际回来 20 条"这种很难归因的错位。
+ */
+const DEFAULT_PAGE_LIMIT = 10
+
 function pageOf(
   q: { limit?: string; offset?: string },
   defLimit: number,
@@ -111,7 +119,7 @@ admin.get('/overview', async (c) => c.json(await getOverview()))
 
 admin.get('/devices', async (c) => {
   const raw = c.req.query()
-  const { limit, offset } = pageOf(raw, 20)
+  const { limit, offset } = pageOf(raw, DEFAULT_PAGE_LIMIT)
   const filter: DeviceFilter = {
     online: boolOf(raw.online),
     health: raw.health === 'ok' || raw.health === 'problem' ? raw.health : undefined,
@@ -140,7 +148,7 @@ admin.get('/devices', async (c) => {
 
 admin.get('/tasks', async (c) => {
   const raw = c.req.query()
-  const { limit, offset } = pageOf(raw, 20)
+  const { limit, offset } = pageOf(raw, DEFAULT_PAGE_LIMIT)
   // 过滤必须走服务端：前端过滤只会作用于当前页，页码与 total 会全部对不上
   const status = raw.status || undefined
   const q = raw.q || undefined
@@ -152,14 +160,14 @@ admin.get('/tasks', async (c) => {
 })
 
 admin.get('/unknown-tasks', async (c) => {
-  const { limit, offset } = pageOf(c.req.query(), 20)
+  const { limit, offset } = pageOf(c.req.query(), DEFAULT_PAGE_LIMIT)
   const [items, total] = await Promise.all([listUnknownTasks(limit, offset), countUnknownTasks()])
   return c.json({ items, total })
 })
 
 admin.get('/posts', async (c) => {
   const raw = c.req.query()
-  const { limit, offset } = pageOf(raw, 20)
+  const { limit, offset } = pageOf(raw, DEFAULT_PAGE_LIMIT)
   const filter: PostFilter = {
     status: raw.status || undefined,
     city: raw.city || undefined,
@@ -174,13 +182,13 @@ admin.get('/posts', async (c) => {
 })
 
 admin.get('/events', async (c) => {
-  const { limit, offset } = pageOf(c.req.query(), 20)
+  const { limit, offset } = pageOf(c.req.query(), DEFAULT_PAGE_LIMIT)
   const [items, total] = await Promise.all([listTaskEvents(limit, offset), countTaskEvents()])
   return c.json({ items, total })
 })
 
 admin.get('/city-pools', async (c) => {
-  const { limit, offset } = pageOf(c.req.query(), 20)
+  const { limit, offset } = pageOf(c.req.query(), DEFAULT_PAGE_LIMIT)
   const [items, total, availableProvinces] = await Promise.all([
     listCitiesAdmin(limit, offset),
     countCities(),
@@ -192,19 +200,19 @@ admin.get('/city-pools', async (c) => {
 })
 
 admin.get('/materials', async (c) => {
-  const { limit, offset } = pageOf(c.req.query(), 20)
+  const { limit, offset } = pageOf(c.req.query(), DEFAULT_PAGE_LIMIT)
   const [items, total] = await Promise.all([listMaterials(limit, offset), countMaterials()])
   return c.json({ items, total })
 })
 
 admin.get('/scripts', async (c) => {
-  const { limit, offset } = pageOf(c.req.query(), 20)
+  const { limit, offset } = pageOf(c.req.query(), DEFAULT_PAGE_LIMIT)
   const [items, total] = await Promise.all([listScripts(limit, offset), countScripts()])
   return c.json({ items, total })
 })
 
 admin.get('/commands', async (c) => {
-  const { limit, offset } = pageOf(c.req.query(), 20)
+  const { limit, offset } = pageOf(c.req.query(), DEFAULT_PAGE_LIMIT)
   const [items, total] = await Promise.all([listCommands(limit, offset), countCommands()])
   return c.json({ items, total })
 })

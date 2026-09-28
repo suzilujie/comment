@@ -371,12 +371,20 @@ export function FilterSearch({
 // ── 分页 ────────────────────────────────────────────────────
 
 /**
+ * 列表默认每页条数（各页 `usePaging()` 的初始值）。
+ *
+ * ⚠ 必须与后台 `admin_routes.ts` 的 `DEFAULT_PAGE_LIMIT` 保持一致：前端不传 `limit` 时
+ * 由后台兜底，两边不一致会让"10 条/页"的选择看起来生效、实际返回 20 条。
+ */
+export const DEFAULT_PAGE_SIZE = 10
+
+/**
  * 列表分页状态。
  *
  * 约定 `page` 从 **0** 开始；**改每页条数时自动回到第一页** ——
  * 否则会停在一个越界的页码上，看起来就像"数据没了"。
  */
-export function usePaging(defaultSize = 20) {
+export function usePaging(defaultSize = DEFAULT_PAGE_SIZE) {
   const [page, setPage] = useState(0)
   const [pageSize, setPageSizeRaw] = useState(defaultSize)
   const setPageSize = useCallback((n: number) => {
