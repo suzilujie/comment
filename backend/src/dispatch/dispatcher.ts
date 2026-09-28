@@ -44,8 +44,15 @@ export interface DispatchOutcome {
   retryAfterSeconds?: number
 }
 
-/** 主入口：尝试为设备派发一条任务 */
-export async function dispatchTo(deviceId: string): Promise<DispatchOutcome> {
+/**
+ * 主入口：尝试为设备派发一条任务。
+ *
+ * @param claimedCity 领取请求里带的「当下属地」（设备刚探测、已归一化）。优先于库值。
+ */
+export async function dispatchTo(
+  deviceId: string,
+  claimedCity?: string,
+): Promise<DispatchOutcome> {
   const device = await getDevice(deviceId)
   if (!device) {
     return { task: null, reason: NO_DISPATCH_REASONS.DEVICE_NOT_FOUND, retryAfterSeconds: 600 }
@@ -94,7 +101,16 @@ export async function dispatchTo(deviceId: string): Promise<DispatchOutcome> {
   }
 
   // ── 第 9 条：属地匹配（设备当前出口城市 == 帖子城市）──
-  const city = device.last_ip_city
+  // 优先用**领取请求里带的属地**（设备刚探测过，最新），回退 devices.last_ip_city
+  // （心跳最多滞后 30 秒）。两者不一致本身就是值得留痕的信号：说明发生了「被动换 IP」
+  // 或心跳滞后 —— 这正是过去导致 ip_mismatch 白跑的那种情形。
+  const storedCity = device.last_ip_city
+  const city = claimedCity && claimedCity !== 'unknown' ? claimedCity : storedCity
+  if (claimedCity && storedCity && claimedCity !== storedCity) {
+    log.info(
+      `dispatch city override device=${deviceId} stored=${storedCity} claimed=${claimedCity}`,
+    )
+  }
   if (!city) {
     log.info(`dispatch reject device=${deviceId} stage=city reason=no_last_ip_city`)
     return { task: null, reason: NO_DISPATCH_REASONS.NO_POST_IN_CITY, retryAfterSeconds: 300 }

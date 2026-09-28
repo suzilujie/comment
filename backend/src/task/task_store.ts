@@ -13,7 +13,10 @@ import { db } from '../db_pg.js'
 import { emit, EVENTS } from '../bus.js'
 import { createLogger } from '../logger.js'
 import { config } from '../config.js'
-import { addMinutes, localDateKey, nowMs } from '../datetime.js'
+// ⚠ `localDayRange` 曾被漏掉：countTodayDone / countDevicePostComments 都在调它，
+// 但 import 里没有 → `tsc --noEmit` 报 TS2304，且一旦有人真的调用这两个函数，
+// 会在运行时抛 ReferenceError。两者目前都是死代码（全仓无调用方），所以一直没暴露。
+import { addMinutes, localDateKey, localDayRange, nowMs } from '../datetime.js'
 import { makeId, randomInt } from '../random.js'
 import type { Actor, TaskStatus } from '../types.js'
 

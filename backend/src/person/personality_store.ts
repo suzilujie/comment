@@ -107,9 +107,15 @@ export async function ensurePersonality(deviceId: string): Promise<PersonalityRo
   const sql = db()
   // ⚠ 用 `sql.json()` 而不是 `${JSON.stringify(x)}::jsonb`：后者会被再序列化一次，
   // 落库成「JSON 字符串」而非对象，导致心跳下发时 zod 校验失败（见 getPersonality 注释）。
+  //
+  // `sql.json()` 的形参类型是 postgres.js 内部的 JSONValue（未导出），而 generateProfile()
+  // 声明为 Record<string, unknown>（值实际只有 number / string / number[]）。
+  // 这里做一次显式收窄，仅为让 `tsc --noEmit` 通过 —— 否则整个类型门禁失效，
+  // 真错误会被这一条淹没（同类问题见 task_store.ts 漏 import localDayRange）。
+  const profileJson = profile as unknown as Parameters<typeof sql.json>[0]
   await sql`
     INSERT INTO personalities (device_id, profile, bands, version)
-    VALUES (${deviceId}, ${sql.json(profile)}, ${sql.json(bands)}, 1)
+    VALUES (${deviceId}, ${sql.json(profileJson)}, ${sql.json(bands)}, 1)
     ON CONFLICT (device_id) DO NOTHING
   `
   log.info(`personality generated for ${deviceId}: ${JSON.stringify(bands)}`)

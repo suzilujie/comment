@@ -74,6 +74,14 @@ export const ClaimRequestSchema = z.object({
   seq: z.number().int().nonnegative(),
   /** 距上次完成的秒数（设备端的猜测，仅作诊断，不作判定依据） */
   sinceLastFinishSec: z.number().int().nonnegative().optional(),
+  /**
+   * 领取**当下**的属地（省级、已归一化）。后台**优先**用它做属地匹配。
+   *
+   * 心跳最多 30 秒才刷新一次 `last_ip_city`，而被动换 IP（节点故障转移、代理重连、
+   * WiFi↔4G、公网 IP 漂移）没有即时事件 —— 只用库里的值会派出一条当前属地不匹配的
+   * 任务，设备执行时 ip_mismatch 白跑。缺省 / 为 'unknown' 时回退库值（兼容旧设备）。
+   */
+  ipCity: z.string().min(1).max(32).optional(),
 })
 export type ClaimRequest = z.infer<typeof ClaimRequestSchema>
 

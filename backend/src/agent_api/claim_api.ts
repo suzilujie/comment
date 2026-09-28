@@ -19,7 +19,9 @@ route.post('/', async (c) => {
   if (!g) return c.res
 
   const { device, data } = g
-  const outcome = await dispatchTo(device.id)
+  // 把请求里带的「领取当下属地」透传给派单：它比 devices.last_ip_city 新
+  // （后者最多滞后一个心跳周期），可避免被动换 IP 时的 ip_mismatch 白跑。
+  const outcome = await dispatchTo(device.id, data.ipCity)
   const serverTimeMs = nowMs()
 
   if (!outcome.task) {

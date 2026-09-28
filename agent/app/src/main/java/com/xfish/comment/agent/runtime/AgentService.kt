@@ -178,6 +178,17 @@ class AgentService : Service() {
     @Volatile
     private var consecutiveHeartbeatFailures: Int = 0
 
+    /**
+     * 下一次心跳的间隔（秒）—— 取自后台下发的 `nextHeartbeatSeconds`。
+     *
+     * ⚠ 早期设备端写死 `Config.HEARTBEAT_SECONDS`，从不读响应里的该字段：
+     * 运维把后台的 `HEARTBEAT_SECONDS` 环境变量改成 60 后，设备仍按 30 秒打点 ——
+     * 配置成了单向摆设（后台按新值算阈值，设备按旧值发心跳），排查起来非常费解。
+     * 这里落地后台值并夹在合理区间（防误配置把心跳打成忙等或假离线）。
+     */
+    @Volatile
+    private var serverHeartbeatSeconds: Int = Config.HEARTBEAT_SECONDS
+
     private val json = Json { encodeDefaults = false; explicitNulls = false }
 
     override fun onCreate() {
@@ -327,7 +338,8 @@ class AgentService : Service() {
 
                 val delayMs = if (ok) {
                     consecutiveHeartbeatFailures = 0
-                    Rnd.jitterMs(Config.HEARTBEAT_SECONDS, Config.HEARTBEAT_JITTER_RATIO)
+                    // 用后台下发的间隔（而非写死的常量），让服务端配置真正生效
+                    Rnd.jitterMs(serverHeartbeatSeconds, Config.HEARTBEAT_JITTER_RATIO)
                 } else {
                     consecutiveHeartbeatFailures++
                     val base = (30_000L * consecutiveHeartbeatFailures)
@@ -414,6 +426,18 @@ class AgentService : Service() {
         // 校时（所有时间比较以服务端为准）
         Time.onServerTime(resp.serverTimeMs)
         Prefs.markHeartbeat(this)
+
+        // 后台下发的心跳间隔 → 下一次排期。夹区间（见 Config.HEARTBEAT_SECONDS_MIN/MAX）：
+        // 越界的值一律忽略并告警，避免一次误配置直接把设备打成"忙等"或"永久离线"。
+        val hbSec = resp.nextHeartbeatSeconds
+        if (hbSec in Config.HEARTBEAT_SECONDS_MIN..Config.HEARTBEAT_SECONDS_MAX) {
+            if (serverHeartbeatSeconds != hbSec) {
+                Log.i(TAG, "心跳间隔由后台调整为 ${hbSec}s（原 ${serverHeartbeatSeconds}s）")
+                serverHeartbeatSeconds = hbSec
+            }
+        } else {
+            Log.w(TAG, "后台下发的心跳间隔越界（${hbSec}s），沿用 ${serverHeartbeatSeconds}s")
+        }
 
         // 城市池（仅内容变化时后台才下发）
         resp.cityPool?.let { pool ->
@@ -569,6 +593,10 @@ class AgentService : Service() {
                                 deviceId = Prefs.deviceId(this@AgentService),
                                 seq = Prefs.nextSeq(this@AgentService),
                                 sinceLastFinishSec = sinceLastFinishSec(),
+                                // 把「刚探测到的属地」一并带上，后台优先用它匹配帖子。
+                                // 归一失败时传 null（而非 "unknown"）：null 会让后台回退库值，
+                                // 而 "unknown" 必然匹配不到任何帖子（posts.city 里没有这个值）。
+                                ipCity = resolveRegionForReport(probe.region).takeIf { it != "unknown" },
                             ),
                         )
                         Time.onServerTime(resp.serverTimeMs)

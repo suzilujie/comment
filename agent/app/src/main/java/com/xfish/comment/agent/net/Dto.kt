@@ -79,6 +79,18 @@ data class ClaimReq(
     val seq: Long,
     /** 距上次完成的秒数（设备端猜测，仅诊断用） */
     val sinceLastFinishSec: Long? = null,
+    /**
+     * 领取**当下**的属地（省级、已归一化）。
+     *
+     * 为什么需要它：属地在后台只有心跳这一条同步通道，最多滞后 30 秒；而**被动换 IP**
+     * （Clash 节点故障转移、代理重连、WiFi↔4G、宽带公网 IP 漂移）没有任何事件可以
+     * 即时上报。后台若只用库里的旧值匹配帖子，会派出一条当前属地根本不匹配的任务，
+     * 设备执行时被判 `ip_mismatch` —— 白跑一次派发（并白记一笔 aborted）。
+     *
+     * 设备在领取前本就刚探测过属地（ensureProbe），这里把它一并带上，后台优先采信。
+     * 为空时（旧版本设备 / 探测失败）后台回退 `devices.last_ip_city`，保持兼容。
+     */
+    val ipCity: String? = null,
 )
 
 /** ③ 事件请求 */

@@ -30,6 +30,16 @@ object Config {
     /** 心跳连续失败的退避上限（秒） */
     const val HEARTBEAT_MAX_BACKOFF_SECONDS = 300
 
+    /**
+     * 后台可下发的心跳间隔上下限（秒）。
+     *
+     * 后台会在心跳响应里返回 `nextHeartbeatSeconds`，设备按它排期（见
+     * `AgentService.serverHeartbeatSeconds`）。夹一层区间防止误配置：
+     * 下发 0 会打成忙等、下发 86400 会让设备"看起来永久离线"。
+     */
+    const val HEARTBEAT_SECONDS_MIN = 10
+    const val HEARTBEAT_SECONDS_MAX = 300
+
     // ── 任务领取（§5.1）────────────────────────────────────────
     /** 领取时机 = 距上次「完成」+ 本机随机 [30, 60] 分钟（设备只猜时机） */
     const val CLAIM_MIN_INTERVAL_MIN = 30
