@@ -60,7 +60,7 @@ export default function Devices({ autoMs, refreshKey, notify }: Props) {
   return (
     <Card
       title="设备"
-      subtitle="按最后心跳倒序；「复位计数」归零日计数，「下发指令」可触发领取/切城/自检/暂停等"
+      subtitle="按最后心跳倒序；「复位计数」归零日计数，「下发指令」可触发领取/切省/自检/暂停等"
       actions={
         <Btn onClick={dev.reload} disabled={dev.loading}>
           刷新

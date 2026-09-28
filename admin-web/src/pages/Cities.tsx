@@ -9,10 +9,10 @@ interface Props {
 }
 
 /**
- * 城市池管理。
+ * 省份池管理。
  *
  * 两个用途：
- *  ① **设备切城的目标池** —— 设备端从 `active=TRUE` 的省份里随机挑一个切过去；
+ *  ① **设备切省的目标池** —— 设备端从 `active=TRUE` 的省份里随机挑一个切过去；
  *  ② **空跑预警** —— `post_count=0` 表示切到该省会领不到任务（池里有省没帖）。
  *
  * `slug` 是 Clash 侧的 group 名（本项目的组名对所有省份相同，实际按**节点名**区分省份），
@@ -55,7 +55,7 @@ export default function Cities({ autoMs, refreshKey, notify }: Props) {
 
   const remove = async (name: string, postCount: number) => {
     const ok = window.confirm(
-      `从城市池删除「${name}」？\n\n` +
+      `从省份池删除「${name}」？\n\n` +
         '删除后设备不会再切到该省（但已有的帖子不受影响）。\n' +
         (postCount > 0 ? `⚠ 该省当前还有 ${postCount} 个可评帖子，删掉后这些帖子将**永远不会被派单**。\n\n` : '\n') +
         '此操作不可撤销。',
@@ -76,7 +76,7 @@ export default function Cities({ autoMs, refreshKey, notify }: Props) {
 
   return (
     <Card
-      title="城市池"
+      title="省份池"
       subtitle={
         `启用 ${activeCount} 个省份` +
         (emptyCount > 0 ? ` · ⚠ ${emptyCount} 个启用省份没有可评帖子（设备切过去会空跑）` : '')
@@ -113,7 +113,7 @@ export default function Cities({ autoMs, refreshKey, notify }: Props) {
 
       {cities.loading && !cities.data && <Spinner />}
       {cities.error && <ErrorBox msg={cities.error} onRetry={cities.reload} />}
-      {cities.data && items.length === 0 && <Empty text="城市池为空 —— 设备没有可切换的目标" />}
+      {cities.data && items.length === 0 && <Empty text="省份池为空 —— 设备没有可切换的目标" />}
       {items.length > 0 && (
         <Table head={['省份', 'slug', '可评帖子', '状态', '更新时间', '操作']}>
           {items.map((c) => (

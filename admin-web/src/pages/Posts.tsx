@@ -188,8 +188,8 @@ export default function Posts({ autoMs, refreshKey, notify }: Props) {
               </select>
               <div className="mt-1 text-[10px] text-slate-600">
                 {cities.data && cities.data.items.length === 0
-                  ? '⚠ 省份池为空 —— 请先到「城市池」页添加省份，否则帖子永远派不出去'
-                  : '选自「城市池」；需要新省份请先到该页添加（属地是精确匹配，不匹配不会被派单）'}
+                  ? '⚠ 省份池为空 —— 请先到「省份池」页添加省份，否则帖子永远派不出去'
+                  : '选自「省份池」；需要新省份请先到该页添加（属地是精确匹配，不匹配不会被派单）'}
               </div>
             </div>
             <div>
@@ -252,7 +252,7 @@ export default function Posts({ autoMs, refreshKey, notify }: Props) {
         <Empty text="帖子池为空 —— 点「新增帖子」加一个真实抖音链接" />
       )}
       {posts.data && posts.data.items.length > 0 && (
-        <Table head={['帖子', '城市', '状态', '进度', '今占', '最近评论', '累计（成功/待确认/失败）', '操作']}>
+        <Table head={['帖子', '省份', '状态', '进度', '今占', '最近评论', '累计（成功/待确认/失败）', '操作']}>
           {posts.data.items.map((p) => {
             const pct = p.target_count > 0 ? Math.min(100, Math.round((p.committed / p.target_count) * 100)) : 0
             return (

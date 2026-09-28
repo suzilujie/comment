@@ -178,11 +178,11 @@ export interface CommandItem {
 /** 管理台可下发的设备指令（与后台 SENDABLE_COMMANDS 保持一致） */
 export const COMMAND_KINDS = [
   { kind: 'claim_now', label: '立即领取', hint: '跳过本机 30~60 分钟等待，立刻请求派单' },
-  { kind: 'rotate_now', label: '立即切城', hint: '跳过 2 天周期，立刻执行一次跨省切换' },
+  { kind: 'rotate_now', label: '立即切省', hint: '跳过 2 天周期，立刻执行一次跨省切换' },
   { kind: 'probe', label: '运行自检', hint: '采集机型/权限/出口/元素命中情况' },
   { kind: 'pause', label: '暂停接单', hint: '设备停止领取任务' },
   { kind: 'resume', label: '恢复接单', hint: '设备恢复领取任务' },
-  { kind: 'refresh_pool', label: '刷新城市池', hint: '立刻拉取一次城市池配置' },
+  { kind: 'refresh_pool', label: '刷新省份池', hint: '立刻拉取一次省份池配置' },
   { kind: 'restart', label: '重启服务', hint: '重启设备端常驻服务（不影响无障碍授权）' },
 ] as const
 
@@ -358,7 +358,7 @@ export const api = {
   deleteScript: (id: string) =>
     req<OpResult>(`/scripts/${encodeURIComponent(id)}`, { method: 'DELETE' }),
 
-  // ── 城市池 ────────────────────────────────────────────────
+  // ── 省份池（接口路径仍是 /city-pools，属既有契约，不改）──────
 
   cities: () => req<{ items: CityItem[] }>('/city-pools'),
 

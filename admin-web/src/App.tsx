@@ -19,7 +19,7 @@ const TABS = [
   { key: 'posts', label: '帖子池' },
   { key: 'materials', label: '素材' },
   { key: 'scripts', label: '话术' },
-  { key: 'cities', label: '城市池' },
+  { key: 'cities', label: '省份池' },
   { key: 'commands', label: '指令' },
   { key: 'events', label: '事件流' },
 ] as const
@@ -50,7 +50,7 @@ export default function App() {
         <div>
           <h1 className="text-lg font-semibold text-slate-100">评论投放 · 管理台</h1>
           <p className="mt-0.5 text-xs text-slate-500">
-            监控：概览 / 设备 / 任务 / 事件流 · 配置：帖子池 / 素材 / 话术 / 城市池 · 运维：指令下发
+            监控：概览 / 设备 / 任务 / 事件流 · 配置：帖子池 / 素材 / 话术 / 省份池 · 运维：指令下发
           </p>
         </div>
         <div className="flex items-center gap-2">

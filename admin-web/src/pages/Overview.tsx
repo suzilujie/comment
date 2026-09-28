@@ -106,7 +106,7 @@ export default function Overview({ autoMs, refreshKey }: Props) {
           hint={`启用 / 全部（暂停 ${d?.postsPaused ?? 0}）`}
         />
         <StatCard label="可用话术" value={d?.scriptsEnabled ?? '-'} hint="enabled = true" />
-        <StatCard label="激活城市池" value={d?.citiesActive ?? '-'} hint="下发给设备的切城目标" />
+        <StatCard label="激活省份池" value={d?.citiesActive ?? '-'} hint="下发给设备的切省目标" />
       </div>
 
       {(d?.tasksUnknown ?? 0) > 0 && (
