@@ -587,10 +587,20 @@ object TaskExecutor {
      * @return 读到的评论数；读不到返回 null（此时不做任何正向判定，保持保守的 unknown）
      */
     private fun readCommentCount(): Int? {
-        val re = Regex("评论(\\d+)")
-        return NodeFinder.snapshotTexts().firstNotNullOfOrNull { s ->
-            re.find(s)?.groupValues?.getOrNull(1)?.toIntOrNull()
+        // 抖音两种呈现都见过：
+        //  · 详情页底部按钮：desc="评论12，按钮"；
+        //  · 评论面板真正展开后：标题变成"共 12 条评论" / "12 条评论"（"评论N"按钮被面板遮住）。
+        // 只认第一种时，一旦面板真正展开就恒读不到 —— 实测 2026-09-28：基线=null->null，
+        // 正向判据退化成只靠"评论文本可见"。
+        val patterns = listOf(Regex("评论(\\d+)"), Regex("(\\d+)\\s*条评论"))
+        val texts = NodeFinder.snapshotTexts()
+        for (re in patterns) {
+            val hit = texts.firstNotNullOfOrNull { s ->
+                re.find(s)?.groupValues?.getOrNull(1)?.toIntOrNull()
+            }
+            if (hit != null) return hit
         }
+        return null
     }
 
     /** 评论数是否增加（前后两个值都必须读到，否则视为不可判定 → 不产生正向结论） */
