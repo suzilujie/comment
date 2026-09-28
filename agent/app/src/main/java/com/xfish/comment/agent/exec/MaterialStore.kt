@@ -9,8 +9,11 @@ import android.provider.MediaStore
 import com.xfish.comment.agent.core.Log
 import com.xfish.comment.agent.net.Api
 import com.xfish.comment.agent.net.TaskImageDto
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.File
 
@@ -37,12 +40,29 @@ object MaterialStore {
             Log.d(TAG, "素材命中缓存 ${image.hash} (${dest.length()} bytes)")
             return@withContext dest.absolutePath
         }
+        // ⚠ 先下到临时文件、成功后再改名：直接写 dest 时若中途失败会留下**半截文件**，
+        // 而下次调用只判 `exists && length>0` 就会把它当成有效缓存 → 往抖音传损坏图片。
+        val tmp = File(dir, "${image.hash}.tmp")
         return@withContext try {
-            val size = Api.download(image.url, dest)
-            Log.i(TAG, "素材下载完成 ${image.hash} ($size bytes)")
-            dest.absolutePath
+            if (tmp.exists()) tmp.delete()
+            val size = Api.download(image.url, tmp)
+            if (tmp.length() <= 0L) {
+                tmp.delete()
+                Log.w(TAG, "素材下载内容为空 ${image.hash}")
+                null
+            } else {
+                if (dest.exists()) dest.delete()
+                if (!tmp.renameTo(dest)) {
+                    // rename 失败（跨文件系统等）时退回拷贝
+                    tmp.copyTo(dest, overwrite = true)
+                    tmp.delete()
+                }
+                Log.i(TAG, "素材下载完成 ${image.hash} ($size bytes)")
+                dest.absolutePath
+            }
         } catch (e: Exception) {
             Log.e(TAG, "素材下载失败 ${image.hash}", e)
+            runCatching { tmp.delete() }
             null
         }
     }
@@ -69,9 +89,10 @@ object MaterialStore {
                 }
             }
 
+            var uri: Uri? = null
             try {
                 val resolver = context.contentResolver
-                val uri = resolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values)
+                uri = resolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values)
                 if (uri == null) {
                     Log.w(TAG, "MediaStore.insert 返回 null")
                     return@withContext null
@@ -90,19 +111,30 @@ object MaterialStore {
                 Log.i(TAG, "素材已写入相册：$displayName → $uri")
                 uri
             } catch (e: Exception) {
-                Log.e(TAG, "写入相册失败", e)
+                // ⚠ 必须回滚：insert 已成功但 copy/update 抛异常时，会留下一条
+                // IS_PENDING=1 的**孤儿相册行** —— 它不在任何清理列表里，永远残留在用户相册。
+                uri?.let { u -> runCatching { context.contentResolver.delete(u, null, null) } }
+                Log.e(TAG, "写入相册失败（已回滚 MediaStore 条目）", e)
                 null
             }
         }
 
     /**
      * 延时清理相册条目（设计文档要求：**不能立即删**，否则抖音引用失效）。
-     * 默认 10 分钟后清理；页面关闭或进程被杀时由下次启动的补偿逻辑处理。
+     * 默认 10 分钟后清理；进程被杀时由下次启动的 [sweepLegacyAlbum] 兜底。
+     *
+     * ⚠ 必须用**独立作用域**：早期实现直接在调用方协程里 `delay(10min)`，而调用方是
+     * 任务执行协程（几秒内就结束）→ delay 抛 CancellationException，**清理从未执行**，
+     * 相册里不断堆积素材。这里挂到独立 Scope，保证延时结束后仍能跑完。
      */
-    suspend fun cleanupAlbumLater(context: Context, uris: List<Uri>, delayMs: Long = 10 * 60_000L) {
+    fun cleanupAlbumLater(context: Context, uris: List<Uri>, delayMs: Long = 10 * 60_000L) {
         if (uris.isEmpty()) return
-        delay(delayMs)
-        cleanupAlbum(context, uris)
+        val app = context.applicationContext
+        CoroutineScope(SupervisorJob() + Dispatchers.IO).launch {
+            delay(delayMs)
+            runCatching { cleanupAlbum(app, uris) }
+                .onFailure { Log.w(TAG, "延时清理相册失败：${it.message}") }
+        }
     }
 
     /** 立即清理相册条目 */

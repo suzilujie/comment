@@ -85,5 +85,6 @@ object Config {
         const val RISK_DIALOG = "risk_dialog"
         const val NETWORK = "network"
         const val UNKNOWN = "unknown"
+        const val DEADLINE_EXCEEDED = "deadline_exceeded"   // 已过后台截止时间，未提交
     }
 }

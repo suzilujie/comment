@@ -41,6 +41,8 @@ import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
@@ -268,10 +270,18 @@ class AgentService : Service() {
 
     // ── ① 心跳循环 ────────────────────────────────────────────
 
+    /**
+     * [doHeartbeat] 互斥。
+     *
+     * `refresh_pool` 指令会**主动**触发一次心跳，而心跳循环本身也在跑 —— 两者并发时
+     * 会同时取 `nextSeq`、刷新探测缓存、重复执行后台下发的指令，产生难排查的乱序。
+     */
+    private val heartbeatLock = Mutex()
+
     private fun startHeartbeatLoop() {
         heartbeatJob = scope.launch {
             while (isActive) {
-                val ok = runCatching { doHeartbeat() }
+                val ok = runCatching { heartbeatLock.withLock { doHeartbeat() } }
                     .onFailure { Log.w(TAG, "心跳异常：${it.message}") }
                     .getOrDefault(false)
 
@@ -714,8 +724,9 @@ class AgentService : Service() {
             }
 
             "refresh_pool" -> {
-                // 下一次心跳会重新拉取城市池；此处立即触发一次心跳
-                runCatching { doHeartbeat() }
+                // 下一次心跳会重新拉取城市池；此处立即触发一次心跳。
+                // 加锁避免与心跳循环并发（见 heartbeatLock 注释）。
+                runCatching { heartbeatLock.withLock { doHeartbeat() } }
                 reporter.sendEvent(
                     event = "command_result",
                     commandId = cmd.commandId,

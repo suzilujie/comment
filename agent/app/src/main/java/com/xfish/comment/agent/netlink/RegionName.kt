@@ -62,8 +62,13 @@ object RegionName {
             .removeSuffix(" special administrative region")
             .trim()
         dict[stripped]?.let { return it }
-        // 包含匹配：任一 key 出现在输入里
-        dict.entries.firstOrNull { k.contains(it.key) }?.let { return it.value }
+        // 包含匹配：取**最长**命中的 key。
+        // 不用 firstOrNull（Map 插入顺序）—— 短 key 可能抢先命中造成误判；
+        // 例如 "guangxi zhuang autonomous region" 应命中 "guangxi zhuang" 这个更具体的写法。
+        dict.entries
+            .filter { k.contains(it.key) }
+            .maxByOrNull { it.key.length }
+            ?.let { return it.value }
         return raw.trim()
     }
 
@@ -83,16 +88,16 @@ object RegionName {
         val pn = normalize(p)
         if (pn.equals(t, ignoreCase = true)) return true
 
-        // 包含匹配：处理「浙江省」/「浙江」
-        if (pn.contains(t) || t.contains(pn)) return true
+        // 包含匹配：处理「浙江省」/「浙江」。
+        // ⚠ 要求双方都至少 2 个字符，否则 t="海南" 与 pn="南" 会互相包含而误判。
+        if (pn.length >= 2 && t.length >= 2 && (pn.contains(t) || t.contains(pn))) return true
 
-        // slug 兜底：province-zhejiang → zhejiang
+        // slug 兜底：province-zhejiang → zhejiang。
+        // ⚠ 必须**等值**，不能双向 contains —— 早期写法下 pk="mongolia"（蒙古国）
+        // 会因含 "mongol" 而命中 targetSlug="province-nei-mongol"（内蒙古）。
         val slugKey = targetSlug?.substringAfterLast('-')?.lowercase()
         if (!slugKey.isNullOrBlank()) {
-            val pk = p.lowercase()
-            val pnk = pn.lowercase()
-            if (pk.contains(slugKey) || slugKey.contains(pk)) return true
-            if (pnk.contains(slugKey) || slugKey.contains(pnk)) return true
+            if (p.lowercase() == slugKey || pn.lowercase() == slugKey) return true
         }
         return false
     }

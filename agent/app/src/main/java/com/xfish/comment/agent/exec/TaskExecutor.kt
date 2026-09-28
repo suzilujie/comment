@@ -286,6 +286,16 @@ object TaskExecutor {
             }
 
             // ── 步骤 10：提交 ──
+            // 超期检查：前面有大量拟人化等待（浏览最长 90 秒 + 阅读评论 + 收尾 1~3 条），
+            // 叠加后可能已过后台给的 deadline。此刻**还没点发送**，所以按 aborted 明确
+            // 「确认未发出、可退配额」上报，而不是继续发一条后台已判超时的评论。
+            if (isPastDeadline(task)) {
+                Log.w(TAG, "已超过后台截止时间（${task.deadlineAt}），放弃提交")
+                return finish(
+                    Outcome("aborted", Config.Reason.DEADLINE_EXCEEDED, "past_deadline", startedAt = startedAt),
+                    task, reporter,
+                )
+            }
             // 实测：抖音的「发送」是 clickable=false 的 TextView，控件点击可能落在错误的祖先上，
             // 表现为「点完发送但文本仍在输入框」。改为「点击 → 验证输入框是否清空 → 重试」。
             riskOrNull()?.let { return finish(it.copy(startedAt = startedAt), task, reporter) }
@@ -424,6 +434,20 @@ object TaskExecutor {
             TAG,
             "$what → 页面=${AutoService.currentPage()} 文本摘要（${dump.size} 条）：${dump.joinToString(" | ")}",
         )
+    }
+
+    /**
+     * 是否已过后台给的截止时间。
+     *
+     * deadlineAt 为 ISO 串。解析失败按「未超期」处理 —— 宁可多跑一条，
+     * 也不要因为解析问题把正常任务全废掉。
+     */
+    private fun isPastDeadline(task: TaskPackageDto): Boolean {
+        val raw = task.deadlineAt
+        if (raw.isBlank()) return false
+        return runCatching {
+            java.time.OffsetDateTime.parse(raw).toInstant().toEpochMilli() < Time.nowMs()
+        }.getOrDefault(false)
     }
 
     /** 风险评估（非空即代表必须中止） */

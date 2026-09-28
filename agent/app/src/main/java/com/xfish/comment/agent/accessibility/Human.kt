@@ -96,7 +96,7 @@ object Human {
 
         val def = Persona()
         val comments = i("commentsToRead") ?: 3
-        return Persona(
+        val p = Persona(
             dwellMedianSec = d("dwellMedianSec") ?: def.dwellMedianSec,
             dwellSigma = d("dwellSigma") ?: def.dwellSigma,
             preClickMsMedian = d("preClickMsMedian") ?: def.preClickMsMedian,
@@ -113,6 +113,15 @@ object Human {
             lingerAfterPostMinSec = d("lingerAfterPostSec")?.let { (it * 0.5).coerceAtLeast(1.0) } ?: def.lingerAfterPostMinSec,
             lingerAfterPostMaxSec = d("lingerAfterPostSec") ?: def.lingerAfterPostMaxSec,
             exitMode = obj["exitMode"]?.jsonPrimitive?.contentOrNullSafe() ?: def.exitMode,
+        )
+        // ⚠ 兜一次「min > max」倒挂：min 是「基准 × 系数，且有下限」，max 直接用基准，
+        // 基准偏小时下限会把 min 抬到高于 max（thinkPauseSec=0.3 → min=0.5 > max=0.3；
+        // lingerAfterPostSec<1.0 同理）。倒挂会让 Rnd.double(min,max) 产生负跨度、
+        // delay 收到负值 —— 表现为「思考 / 校验等待 / 发完逗留」全部瞬间结束。
+        return p.copy(
+            thinkPauseMaxSec = maxOf(p.thinkPauseMaxSec, p.thinkPauseMinSec),
+            verifyPauseMaxSec = maxOf(p.verifyPauseMaxSec, p.verifyPauseMinSec),
+            lingerAfterPostMaxSec = maxOf(p.lingerAfterPostMaxSec, p.lingerAfterPostMinSec),
         )
     }
 
