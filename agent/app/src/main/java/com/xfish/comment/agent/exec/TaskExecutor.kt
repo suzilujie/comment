@@ -189,16 +189,35 @@ object TaskExecutor {
             }
             Log.i(TAG, "步骤5-b 短链已进入抖音：等待=${waitedMs}ms 页面=${AutoService.currentPage()}")
 
-            // 确认我们确实在帖子页（能读到评论入口）—— 这是「有没有进入目标视频」的唯一判据
+            // ── 确认已进入**目标视频详情页** ──
+            // ⚠ 判据不能只是「找得到评论入口」：**首页推荐流的视频同样有评论入口**，
+            //    短链失效停在首页时也会通过 —— 那样就会给一个**错误的视频**发评论，
+            //    而回执还是 succeeded（2026-09-28 实测：入口确认仅 23ms 就"通过"了，
+            //    当时页面其实是 homepage...CustomRelativeLayout）。
+            // 改为「**详情页出现过**」（短链解析成功的可靠标志）＋「评论入口可读」。
             val tPost = Time.elapsedMs()
-            val onPost = NodeFinder.waitFor(DouyinLocators.commentEntry, timeoutMs = 8_000) != null
+            var onPost = AutoService.awaitDetailPage(8_000) &&
+                NodeFinder.waitFor(DouyinLocators.commentEntry, timeoutMs = 3_000) != null
+
+            if (!onPost) {
+                // 短链可能没被解析（停在首页 / 推荐流）→ 重投一次短链再判一次
+                Log.w(TAG, "首次未确认详情页（页面=${AutoService.currentPage()}），重投一次短链")
+                Actions.openShortLink(context, task.postUrl)
+                onPost = AutoService.awaitDetailPage(8_000) &&
+                    NodeFinder.waitFor(DouyinLocators.commentEntry, timeoutMs = 3_000) != null
+            }
+
             if (!onPost) {
                 Log.w(
                     TAG,
-                    "未进入目标视频页（找不到评论入口）：帖子=${task.postId} " +
+                    "未进入目标视频页（无详情页特征）：帖子=${task.postId} " +
                         "页面=${AutoService.currentPage()} 探测耗时=${Time.elapsedMs() - tPost}ms",
                 )
-                return finish(Outcome("failed", Config.Reason.POST_MISMATCH, "comment_entry_not_found", startedAt = startedAt), task, reporter)
+                logPageDump("未进入目标视频页")
+                return finish(
+                    Outcome("failed", Config.Reason.POST_MISMATCH, "detail_page_not_entered", startedAt = startedAt),
+                    task, reporter,
+                )
             }
             Log.i(
                 TAG,

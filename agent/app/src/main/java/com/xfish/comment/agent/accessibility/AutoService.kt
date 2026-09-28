@@ -3,11 +3,13 @@ package com.xfish.comment.agent.accessibility
 import android.accessibilityservice.AccessibilityService
 import android.accessibilityservice.AccessibilityServiceInfo
 import android.content.Context
+import android.os.SystemClock
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
 import com.xfish.comment.agent.core.Bus
 import com.xfish.comment.agent.core.Config
 import com.xfish.comment.agent.core.Log
+import kotlinx.coroutines.delay
 
 /**
  * 无障碍服务：设备端 Agent 的「眼睛与手指」。
@@ -26,6 +28,18 @@ class AutoService : AccessibilityService() {
         /** 窗口事件缓存的有效期；超时后才回退去读 rootInActiveWindow */
         private const val PAGE_CACHE_TTL_MS = 3_000L
 
+        /** 「有意义页面」类名的保鲜期：超时后 [currentPage] 不再拿它当当前页面 */
+        private const val PAGE_CLS_TTL_MS = 60_000L
+
+        /** 视频详情页特征（抖音短链解析成功后必经此 Activity） */
+        private const val DETAIL_ACTIVITY_HINT = "detail.ui.DetailActivity"
+
+        /** 容器 / 控件类名前缀：这些类名标不出「哪个页面」，不参与页面判定 */
+        private val VIEW_CLASS_PREFIXES = listOf(
+            "android.widget.", "android.view.", "android.webkit.",
+            "androidx.", "com.android.internal.",
+        )
+
         @Volatile
         private var instance: AutoService? = null
 
@@ -38,6 +52,17 @@ class AutoService : AccessibilityService() {
 
         @Volatile
         private var cachedAt: Long = 0L
+
+        /** 最近一个「像页面」的类名（Activity/Dialog，排除布局容器）及其发生时刻 */
+        @Volatile
+        private var lastPageCls: String? = null
+
+        @Volatile
+        private var lastPageAt: Long = 0L
+
+        /** 最近一次出现视频详情页的时刻（单调时钟） */
+        @Volatile
+        private var lastDetailAt: Long = 0L
 
         /** 服务是否已连接（心跳用它上报 accessibilityOk） */
         val connected: Boolean get() = instance != null
@@ -61,18 +86,57 @@ class AutoService : AccessibilityService() {
             return runCatching { instance?.rootInActiveWindow?.packageName?.toString() }.getOrNull()
         }
 
+        /** 类名是否「像个页面」（Activity / Dialog），而不是布局容器 */
+        private fun looksLikePage(cls: String?): Boolean {
+            if (cls.isNullOrBlank()) return false
+            if (cls.endsWith("Activity") || cls.endsWith("Dialog")) return true
+            if (VIEW_CLASS_PREFIXES.any { cls.startsWith(it) }) return false
+            return !(cls.endsWith("Layout") || cls.endsWith("View") || cls.endsWith("ViewGroup"))
+        }
+
         /**
          * 当前页面（`包名/类名`），用于日志定位「到底进了哪个页面」。
          *
-         * **刻意不设 TTL**：窗口事件的 `className` 才是 Activity 名（如 `...detail.ui.DetailActivity`），
-         * 而 `rootInActiveWindow.className` 只是根 View（如 `android.widget.FrameLayout`），
-         * 对定位毫无价值。抖音详情页常驻时不再产生窗口事件，若按 TTL 回退读树，
-         * 日志就会打出 `FrameLayout` 这种误导信息（实测踩过）。
+         * ⚠ 窗口事件里的 `className` 有两类，混用会打出误导信息（实测踩过两次）：
+         *  · **Activity**（`...detail.ui.DetailActivity`）—— 真正的页面标识；
+         *  · **布局容器**（`android.widget.FrameLayout`、`...tabstrip.container.CustomRelativeLayout`）
+         *    —— 只说明"某块布局在变化"，看起来像首页，实际可能正停在详情页。
+         * 所以优先用「最近出现过的、像页面的类名」，容器类名只在完全没有 Activity 时兜底；
+         * 同时给 60 秒保鲜期：太久以前的页面不该继续冒充"当前页面"。
          */
         fun currentPage(): String {
             val pkg = cachedPkg ?: root()?.packageName?.toString() ?: "-"
-            val cls = cachedCls ?: root()?.className?.toString() ?: "-"
+            val fresh = lastPageCls?.takeIf {
+                lastPageAt > 0L && SystemClock.elapsedRealtime() - lastPageAt < PAGE_CLS_TTL_MS
+            }
+            val cls = fresh ?: cachedCls ?: root()?.className?.toString() ?: "-"
             return "$pkg/$cls"
+        }
+
+        /**
+         * 近期是否出现过**视频详情页**。
+         *
+         * ⚠ 用「出现过」而不是「当前就在」：抖音详情页常驻后不再产生窗口事件，
+         * 之后首页 tab 容器的 window 事件会覆盖 [cachedCls]，于是"当前页面"看起来是首页 ——
+         * 但详情页其实一直在。而「有没有进过详情页」正是「短链有没有解析成功」的可靠标志。
+         */
+        fun sawDetailPage(windowMs: Long = 15_000L): Boolean =
+            lastDetailAt > 0L && SystemClock.elapsedRealtime() - lastDetailAt < windowMs
+
+        /**
+         * 等待详情页出现。
+         *
+         * ⚠ 判据不能只是「找得到评论入口」：**首页推荐流的视频同样有评论入口**，
+         * 短链失效停在首页时也会通过 —— 那样就会给一个**错误的视频**发评论，
+         * 而且回执还是 succeeded（2026-09-28 实测：入口确认仅 23ms 就"通过"了）。
+         */
+        suspend fun awaitDetailPage(timeoutMs: Long = 8_000L): Boolean {
+            val t0 = SystemClock.elapsedRealtime()
+            while (SystemClock.elapsedRealtime() - t0 < timeoutMs) {
+                if (sawDetailPage()) return true
+                delay(250)
+            }
+            return sawDetailPage()
         }
 
         /** 抖音是否在前台 */
@@ -120,7 +184,19 @@ class AutoService : AccessibilityService() {
             cachedPkg = e.packageName?.toString()
             cachedCls = e.className?.toString()
             cachedAt = System.currentTimeMillis()
-            Log.d(TAG, "window → ${cachedPkg ?: ""} ${cachedCls ?: ""}")
+
+            val cls = cachedCls
+            if (cls != null) {
+                // 只有「像页面」的类名才记入 lastPageCls（容器类名不参与，否则会盖掉真实页面）
+                if (looksLikePage(cls)) {
+                    lastPageCls = cls
+                    lastPageAt = SystemClock.elapsedRealtime()
+                }
+                if (cls.contains(DETAIL_ACTIVITY_HINT)) {
+                    lastDetailAt = SystemClock.elapsedRealtime()
+                }
+            }
+            Log.d(TAG, "window → ${cachedPkg ?: ""} ${cls ?: ""}")
         }
     }
 
@@ -133,6 +209,9 @@ class AutoService : AccessibilityService() {
         cachedPkg = null
         cachedCls = null
         cachedAt = 0L
+        lastPageCls = null
+        lastPageAt = 0L
+        lastDetailAt = 0L
         Log.w(TAG, "无障碍服务已断开")
         Bus.emit(Bus.Events.A11Y_DISCONNECTED)
         Bus.emit(Bus.Events.UI_REFRESH)
