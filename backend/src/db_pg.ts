@@ -22,8 +22,14 @@ export function getPg(): postgres.Sql {
     connect_timeout: 10,
     // 语句级超时：200 台规模下，一条慢查询（如全表聚合）会长时间占住连接，
     // 而连接池只有 24 个 —— 连锁反应就是心跳排队、设备被判离线。
-    // 超时后该请求报错（由各接口的 try/catch 兜住），不拖累其它请求。
-    connection: { statement_timeout: Number(process.env.PG_STATEMENT_TIMEOUT_MS ?? 15_000) },
+    //
+    // ⚠ 必须用 libpq 的 `options: -c name=value` 传递。
+    // 直接写 `connection: { statement_timeout: 15000 }` **不会生效** ——
+    // `statement_timeout` 不是连接启动参数，实测 PG 侧 `SHOW statement_timeout` 仍为 0。
+    // （数据库层另有 `ALTER DATABASE ... SET statement_timeout` 兜底，见部署说明。）
+    connection: {
+      options: `-c statement_timeout=${Number(process.env.PG_STATEMENT_TIMEOUT_MS ?? 15_000)}`,
+    },
     // 忽略 NOTICE（如 CREATE TABLE IF NOT EXISTS 命中已存在的表）
     onnotice: () => {},
   })

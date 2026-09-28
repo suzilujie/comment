@@ -140,6 +140,10 @@ log.info(`backend listening on http://${config.server.host}:${config.server.port
 log.info(`heartbeat=${config.heartbeat.seconds}s quota/day=${config.dispatch.dailyQuotaPerAccount} ` +
   `interval=${config.dispatch.intervalMinMinutes}-${config.dispatch.intervalMaxMinutes}min ` +
   `window=${config.dispatch.windowStartMinute}-${config.dispatch.windowEndMinute}(local minute of day)`)
+// 把关键容量参数打出来：200 台规模下「连接池被 .env 里的旧值覆盖」是很容易漏的坑
+// （改 config.ts 默认值不等于生效 —— .env 优先），启动时显式确认一次。
+log.info(`pg pool=${config.pg.poolMax} statement_timeout=${
+  process.env.PG_STATEMENT_TIMEOUT_MS ?? '15000(default)'}ms`)
 
 async function shutdown(signal: string): Promise<void> {
   log.info(`received ${signal}, shutting down ...`)
