@@ -384,12 +384,14 @@ export default function Posts({ autoMs, refreshKey, notify }: Props) {
                 onChange={(e) => setForm({ ...form, postType: e.target.value as 'video' | 'image' })}
                 className={inputCls}
               >
-                {/* ⚠ 这里选的是**帖子**的类型，不是评论的形态 —— 这是两个字段：
-                    `posts.post_type`（本字段）vs `tasks.comment_type`（派单时按 1/4 配比自动决定）。
-                    原文案「video（纯文字评论）」把两个维度写进一行，读起来自相矛盾，
-                    也让人分不清到底在声明"这帖子是视频"还是"这帖的评论要纯文字"。 */}
-                <option value="video">视频帖（评论只能纯文字）</option>
-                <option value="image">图文帖（1/4 评论配图，需先在素材库补图）</option>
+                {/* ⚠ 这里只是**帖子本身**的分类（视频帖 / 图文帖），**不影响评论形态**：
+                    无论哪种帖子，评论都可以是图文评论或纯文字评论。
+                    「图文 1/4、纯文字 3/4」是按**每帖**的配比自动决定的（见
+                    post_store.findDispatchablePost），与帖子类型无关。
+                    原文案「video（纯文字评论）」把帖子类型与评论形态混写成一行，
+                    等于凭空给视频帖加了一条"只能纯文字"的限制。 */}
+                <option value="video">视频帖</option>
+                <option value="image">图文帖</option>
               </select>
             </div>
             <div>

@@ -68,9 +68,12 @@ CREATE TABLE IF NOT EXISTS posts (
   id               TEXT PRIMARY KEY,
   url              TEXT NOT NULL,                  -- 人工录入的抖音短链
   -- **帖子**的类型：视频帖 / 图文帖（需求：「评论的帖子分为图文帖子和视频类型帖子」）。
-  -- ⚠ 与 tasks.comment_type 是**两个字段**：那个是**每条评论**的形态
-  --   （图文 1/4、纯文字 3/4），由派单时自动算出。本字段只决定"这帖是否参与图文配比"：
-  --   post_type='image' → 允许图文评论；否则一律纯文字（见 decideCommentType）。
+  -- ⚠ 与 tasks.comment_type 是**两个字段**，且**互不影响**：那个是**每条评论**的形态
+  --   （图文 1/4、纯文字 3/4），派单时按配比自动算出。
+  --   **无论帖子是哪种类型，评论都可以是图文或纯文字** —— 本字段只是分类，
+  --   用于"两类帖子均需覆盖"的盘点，不参与评论形态的判定。
+  --   （注：findDispatchablePost 里曾以 `post_type='image'` 作为 need_image 的前置条件，
+  --    那会让视频帖永远是纯文字，与需求不符。）
   post_type        TEXT CHECK (post_type IN ('video', 'image')),
   city             TEXT NOT NULL,                  -- 调度口径：城市
   title            TEXT,
