@@ -1,7 +1,10 @@
 /**
  * 管理台 API（/api/admin/*）—— 供独立前端（comment/admin-web）调用。
  *
- * 部署前提：内网使用，暂不做鉴权；对外暴露前必须加 Token / Basic Auth（见 README 待办）。
+ * 鉴权：除 `POST /login` 外，其余接口都要求 `Authorization: Bearer <token>`；
+ *      token 由 admin_auth.ts 用 HMAC 签发（无状态，改 ADMIN_TOKEN_SECRET 即全量失效）。
+ *      默认凭据 admin/admin，可用 ADMIN_USERNAME / ADMIN_PASSWORD 覆盖。
+ * 部署前提：内网使用；对外暴露前需换 HTTPS 并加固（见 admin-web/README 待办）。
  * 注意：**不要**把这里和 /agent/*（设备端）混用，两者契约完全不同。
  */
 import { Hono } from 'hono'
@@ -9,6 +12,7 @@ import { config } from '../config.js'
 import { listDevices } from '../device/device_store.js'
 import { listCityPool } from '../post/post_store.js'
 import { listTasks } from '../task/task_store.js'
+import { login, tokenOf, verify } from './admin_auth.js'
 import {
   getOverview,
   listPostsWithStats,
@@ -20,6 +24,24 @@ import {
 } from './admin_store.js'
 
 const admin = new Hono()
+
+// ── 登录（唯一免鉴权接口；必须注册在下面的鉴权中间件之前）──────
+admin.post('/login', async (c) => {
+  const body = (await c.req.json().catch(() => ({}))) as Record<string, unknown>
+  const username = typeof body.username === 'string' ? body.username.trim() : ''
+  const password = typeof body.password === 'string' ? body.password : ''
+  const token = login(username, password)
+  if (!token) return c.json({ ok: false, error: '用户名或密码错误' }, 401)
+  return c.json({ ok: true, token, username, expiresInHours: config.admin.tokenTtlHours })
+})
+
+// ── 鉴权中间件：从此往下注册的接口都要求 Bearer token ──────────
+admin.use('*', async (c, next) => {
+  if (!verify(tokenOf(c.req.header('Authorization')))) {
+    return c.json({ ok: false, error: '未登录或登录已过期' }, 401)
+  }
+  await next()
+})
 
 function limitOf(raw: string | undefined, fallback: number): number {
   const n = Number.parseInt(raw ?? '', 10)

@@ -1,9 +1,11 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
+import Login from './Login'
 import Devices from './pages/Devices'
 import Events from './pages/Events'
 import Overview from './pages/Overview'
 import Posts from './pages/Posts'
 import Tasks from './pages/Tasks'
+import { getToken, logout, setUnauthorizedHandler } from './api'
 import { Btn, ToastHost, useToasts } from './ui'
 
 const TABS = [
@@ -17,12 +19,22 @@ const TABS = [
 type TabKey = (typeof TABS)[number]['key']
 
 export default function App() {
+  // 先用本地 token 判断初始登录态，避免刷新页面时闪一下登录页
+  const [loggedIn, setLoggedIn] = useState(() => getToken() !== null)
   const [tab, setTab] = useState<TabKey>('overview')
   const [autoMs, setAutoMs] = useState(15000)
   const [refreshKey, setRefreshKey] = useState(0)
   const { items, push } = useToasts()
 
+  // 任意请求收到 401（token 过期 / 服务端换了密钥）→ 回登录页
+  useEffect(() => {
+    setUnauthorizedHandler(() => setLoggedIn(false))
+    return () => setUnauthorizedHandler(null)
+  }, [])
+
   const common = { autoMs, refreshKey, notify: push }
+
+  if (!loggedIn) return <Login onSuccess={() => setLoggedIn(true)} />
 
   return (
     <div className="mx-auto flex min-h-screen w-full max-w-[1500px] flex-col gap-4 p-4 sm:p-6">
@@ -47,6 +59,15 @@ export default function App() {
             <option value={60000}>60 秒</option>
           </select>
           <Btn onClick={() => setRefreshKey((k) => k + 1)}>立即刷新</Btn>
+          <Btn
+            tone="ghost"
+            onClick={() => {
+              logout()
+              setLoggedIn(false)
+            }}
+          >
+            退出登录
+          </Btn>
         </div>
       </header>
 

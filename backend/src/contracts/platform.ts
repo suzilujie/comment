@@ -36,13 +36,31 @@ export type TaskPackage = z.infer<typeof TaskPackageSchema>
 /** 设备指令（commandId 幂等） */
 export const CommandSchema = z.object({
   commandId: z.string().min(1),
-  kind: z.enum(['probe', 'switch_node', 'pause', 'resume', 'upgrade', 'restart', 'refresh_pool']),
+  // ⚠ 新增指令必须同步：此处 + types.ts 的 CommandKind + 数据库 device_commands.kind 的 CHECK 约束，
+  //    三处缺一处就会导致心跳响应被设备端 Zod 校验拒绝（表现为心跳无故失败）。
+  kind: z.enum([
+    'probe',
+    'switch_node',
+    'pause',
+    'resume',
+    'upgrade',
+    'restart',
+    'refresh_pool',
+    'claim_now', // 调试：立即领取
+    'rotate_now', // 调试：立即切城
+  ]),
   payload: z.record(z.unknown()).optional(),
   expireAt: z.string().optional(),
 })
 export type Command = z.infer<typeof CommandSchema>
 
-/** 城市池条目（设备端只读缓存；slug 即 Clash 的 provider 名与 group 名） */
+/**
+ * 城市池条目（设备端只读缓存）。
+ *
+ * `slug` 是该省份的**唯一标识**（如 `province-hebei`），用于后台主键与排重；
+ * **不是** Clash 的组名 —— 组名由设备端的 `Config.CLASH_CITY_GROUP` 统一指定
+ * （当前为 `city-pool`，一个组内含各省份节点）。
+ */
 export const CityPoolItemSchema = z.object({
   city: z.string().min(1),
   slug: z.string().min(1),

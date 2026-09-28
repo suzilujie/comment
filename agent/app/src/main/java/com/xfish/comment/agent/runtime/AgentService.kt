@@ -30,6 +30,7 @@ import com.xfish.comment.agent.net.WalPendingDto
 import com.xfish.comment.agent.netlink.CityRotator
 import com.xfish.comment.agent.netlink.ClashClient
 import com.xfish.comment.agent.netlink.IpProbe
+import com.xfish.comment.agent.netlink.RegionName
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -307,12 +308,12 @@ class AgentService : Service() {
                 accessibilityOk = SelfCheck.accessibilityOk(this),
                 foregroundOk = SelfCheck.foregroundOk(),
                 // 属地是派单硬匹配条件：探测不到属地即视为出口不可用，
-                // 让后台据此拒绝派单（而不是上报一个匹配不到任何帖子的城市）。
-                proxyOk = probe != null && probe.city.isNotBlank(),
+                // 让后台据此拒绝派单（而不是上报一个匹配不到任何帖子的地域）。
+                proxyOk = probe != null && probe.region.isNotBlank(),
                 ip = probe?.ip ?: Prefs.lastIp(this) ?: "0.0.0.0",
-                // 不回退历史属地（会掩盖代理异常）；空值会被后台 schema 拒绝（400），
-                // 统一上报 unknown 明确表达「属地未知」。
-                ipCity = probe?.city?.takeIf { it.isNotBlank() } ?: "unknown",
+                // 上报**省级**属地（与后台帖子/省份池同粒度）；不回退历史值（会掩盖代理异常）。
+                // 防呆见 resolveRegionForReport：只有能归一成已知省份才上报真实值。
+                ipCity = resolveRegionForReport(probe?.region),
                 ipv6Leak = probe?.ipv6Leak,
                 agentVersion = BuildConfig.VERSION_NAME,
                 rulePackVersion = Prefs.rulePackVersion(this),
@@ -363,6 +364,27 @@ class AgentService : Service() {
         return true
     }
 
+    /**
+     * 心跳上报用的属地值。
+     *
+     * 只有能归一成「可识别的省份」时才上报真实值，否则上报 `unknown`：
+     *  · 后台 schema 要求非空（空值会被 400 拒绝）；
+     *  · 上报一个必然匹配不上 `posts.city` 的英文原名，只会让「一直领不到任务」
+     *    变得极难排查 —— 后台只会回一个 `no_post_in_city`，看不出是归属没归一成功。
+     *
+     * 归一失败时打 WARN，便于发现映射表缺失的省份。
+     */
+    private fun resolveRegionForReport(raw: String?): String {
+        if (raw.isNullOrBlank()) return "unknown"
+        if (RegionName.isResolved(raw)) return RegionName.normalize(raw)
+        Log.w(
+            TAG,
+            "属地无法归一为已知省份（原始值='$raw'），本轮上报 unknown；" +
+                "若频繁出现请补 RegionName 映射表",
+        )
+        return "unknown"
+    }
+
     /** 出口身份：命中缓存直接复用，避免每次心跳都走代理探测 */
     private suspend fun ensureProbe(force: Boolean = false): IpProbe.Result? {
         val now = Time.elapsedMs()
@@ -373,7 +395,7 @@ class AgentService : Service() {
         if (result != null) {
             probeCache = result
             probeCachedAt = now
-            Prefs.saveIp(this, result.ip, result.city)
+            Prefs.saveIp(this, result.ip, result.region)
         }
         return result
     }
@@ -415,7 +437,7 @@ class AgentService : Service() {
                     // 属地是后台派单的硬匹配条件，领了也会在执行时被判 ip_mismatch 中止，
                     // 既浪费一次派发、又干扰后台统计。手动触发时强制重探，避免用过期缓存误判。
                     val probe = ensureProbe(force = manualTriggered)
-                    if (probe == null || probe.city.isBlank()) {
+                    if (probe == null || probe.region.isBlank()) {
                         Log.w(
                             TAG,
                             "属地未就绪（${probe?.let { "ip=${it.ip} 无属地" } ?: "探测失败"}），本轮不领取，30s 后重试",
@@ -517,7 +539,7 @@ class AgentService : Service() {
                 withTimeoutOrNull(5 * 60_000L) { rotateWaker.receive() }
                 if (Prefs.isPaused(this@AgentService)) continue
                 if (executing) continue
-                if (!forceRotateOnce && !CityRotator.isDue()) continue
+                if (!forceRotateOnce && !CityRotator.isDue(this@AgentService)) continue
                 if (forceRotateOnce) {
                     forceRotateOnce = false
                     Log.i(TAG, "调试模式：跳过周期检查，立即切城")
@@ -698,7 +720,7 @@ class AgentService : Service() {
             executing -> append("执行任务中")
             heartbeatOk -> {
                 append("在线")
-                probeCache?.city?.takeIf { it.isNotBlank() }?.let { append(" · $it") }
+                probeCache?.region?.takeIf { it.isNotBlank() }?.let { append(" · $it") }
             }
             else -> append("心跳异常（重试中）")
         }

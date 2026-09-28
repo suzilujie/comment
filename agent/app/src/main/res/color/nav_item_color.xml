@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 底部导航的选中/未选中配色（未选中用暗色，选中用品牌色） -->
+<selector xmlns:android="http://schemas.android.com/apk/res/android">
+    <item android:color="@color/brand" android:state_checked="true" />
+    <item android:color="@color/fg_dim" />
+</selector>

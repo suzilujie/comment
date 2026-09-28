@@ -107,13 +107,17 @@ server {
 
 ## 安全说明（重要）
 
-- 当前 `/api/admin/*` **没有任何鉴权**，仅适合内网使用。
-- 对外暴露前必须补 Token / Basic Auth，并在反向代理层限制来源。
+- `/api/admin/*` 已内置登录鉴权：除 `POST /login` 外，全部接口都要求
+  `Authorization: Bearer <token>`。token 由后端 `admin_auth.ts` 用 HMAC 签发（无状态），
+  默认凭据 **admin / admin**，可用 `ADMIN_USERNAME` / `ADMIN_PASSWORD` 覆盖；
+  改 `ADMIN_TOKEN_SECRET` 会让所有已登录会话立即失效。
+- 该鉴权是**内网级**：明文 HTTP 下 token 仍可能被嗅探。对外暴露前应改 HTTPS，
+  并在反向代理层限制来源。
 - 写操作具有破坏性（删除任务记录、改状态），请勿开放公网。
 
 ## 待办 / TODO
 
-- [ ] 管理端鉴权（Token / Basic Auth）
+- [x] 管理端鉴权（HMAC 无状态 token + 登录页；默认 admin/admin）
 - [ ] 任务与事件的分页与筛选（当前按 limit 拉取）
 - [ ] 设备详情页（历史任务、事件时间线）
 - [ ] 帖子池批量启停、批量改城市

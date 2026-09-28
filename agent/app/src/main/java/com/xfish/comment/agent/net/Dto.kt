@@ -27,7 +27,11 @@ data class DeviceStateDto(
     val proxyOk: Boolean,
     /** 出口 IP（必须走代理请求公网探针获得） */
     val ip: String,
-    /** 出口 IP 所属城市（属地校验依据） */
+    /**
+     * 出口属地 —— **省级**（如 `浙江`）。
+     * 后台派单按它精确匹配 `posts.city`，所以必须与后台写法完全一致；
+     * 两者粒度不匹配是「一直领不到任务」最常见的原因。
+     */
     val ipCity: String,
     /** IPv6 是否泄露（true = 存在直连风险） */
     val ipv6Leak: Boolean? = null,
@@ -166,7 +170,7 @@ data class TaskPackageDto(
     val image: TaskImageDto? = null,
     /** 回执截止时间（ISO，带 +08:00） */
     val deadlineAt: String,
-    /** 派单时刻的出口城市（设备端执行前需自查一致） */
+    /** 派单时刻的出口属地（**省级**；设备端执行前需自查一致） */
     val ipCityTarget: String,
 )
 

@@ -25,15 +25,34 @@ object Config {
     /** 领取轮询的最小间隔（秒），防止异常时狂刷 */
     const val CLAIM_MIN_LOOP_SECONDS = 30
 
-    // ── 切 IP（§5.3，设备自治 + 纯随机跨城）─────────────────────
+    // ── 切 IP（§5.3，设备自治 + 纯随机跨省）─────────────────────
     /** 轮换周期：2 天 */
     const val IP_ROTATE_DAYS = 2
     /** 周期抖动：±4 小时（避免多设备同刻切换） */
     const val IP_ROTATE_JITTER_HOURS = 4
     /** 切换后等待连接建立的时长（毫秒） */
     const val IP_SWITCH_SETTLE_MS = 4_000L
-    /** 属地校验重试次数 */
+    /** **单个省份内**的节点尝试次数（同省内换节点重试） */
     const val IP_VERIFY_MAX_ATTEMPTS = 3
+    /** 一次切城最多尝试几个省份（防止城市池全是坏省份时死循环） */
+    const val IP_SWITCH_MAX_REGION_ATTEMPTS = 3
+    /**
+     * 切城失败后的重试间隔（分钟）。
+     * 网络类故障（节点临时挂掉）恢复很快，没必要等满整个轮换周期。
+     */
+    const val IP_SWITCH_RETRY_MINUTES = 30
+
+    /**
+     * Clash 里承载「省份节点池」的代理组名。
+     *
+     * 支持两种常见配置，代码会自动适配：
+     *  ① **一个组、每省一个节点**（当前配置）：组内节点名即省份名（如「河北」「浙江」），
+     *     切城时按省份名挑节点；
+     *  ② 每省一个组、组内多节点（如 province-hebei）：组内匹配不到省份名，退回随机选。
+     *
+     * ⚠ 组的 type 必须是 `select`（url-test / fallback 会让 Clash 自行换节点导致 IP 漂移）。
+     */
+    const val CLASH_CITY_GROUP = "city-pool"
 
     // ── HTTP ─────────────────────────────────────────────────
     const val HTTP_CONNECT_TIMEOUT_SECONDS = 10L

@@ -3,9 +3,46 @@
  *
  * 统一走 /api/admin 前缀（dev 由 vite 代理到后端，生产由反向代理同域转发），
  * 因此前端代码里不出现 host，也不需要处理跨域。
+ *
+ * 鉴权：除 `/login` 外所有接口都要 `Authorization: Bearer <token>`；
+ *      401 时自动清 token 并回调（由 App 跳回登录页）。
  */
 
 const BASE = '/api/admin'
+
+// ── 登录态 ──────────────────────────────────────────────────
+// token 无状态（后端 HMAC 签发），前端只需存下来随请求带上。
+
+const TOKEN_KEY = 'comment-admin-token'
+
+export function getToken(): string | null {
+  try {
+    return localStorage.getItem(TOKEN_KEY)
+  } catch {
+    return null
+  }
+}
+
+function saveToken(token: string | null): void {
+  try {
+    if (token) localStorage.setItem(TOKEN_KEY, token)
+    else localStorage.removeItem(TOKEN_KEY)
+  } catch {
+    /* 隐私模式等场景 localStorage 不可用，忽略即可 */
+  }
+}
+
+/** 退出登录：token 无状态，清本地即可，服务端无需通知 */
+export function logout(): void {
+  saveToken(null)
+}
+
+let onUnauthorized: (() => void) | null = null
+
+/** 由 App 注册：收到 401 时回登录页 */
+export function setUnauthorizedHandler(fn: (() => void) | null): void {
+  onUnauthorized = fn
+}
 
 export interface Overview {
   devicesTotal: number
@@ -99,10 +136,24 @@ export interface OpResult {
   detail?: Record<string, unknown>
 }
 
-async function req<T>(path: string, init?: RequestInit): Promise<T> {
+/**
+ * 统一请求：自动携带 Bearer token。
+ * `handle401: false` 用于登录接口自身 —— 否则会把「用户名或密码错误」
+ * 误判成「登录已过期」，并触发一次多余的跳转。
+ */
+async function req<T>(
+  path: string,
+  init?: RequestInit,
+  opts: { handle401?: boolean } = {},
+): Promise<T> {
+  const token = getToken()
   const res = await fetch(`${BASE}${path}`, {
-    headers: { 'Content-Type': 'application/json' },
     ...init,
+    headers: {
+      'Content-Type': 'application/json',
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      ...(init?.headers ?? {}),
+    },
   })
   const text = await res.text()
   let data: unknown = null
@@ -111,6 +162,16 @@ async function req<T>(path: string, init?: RequestInit): Promise<T> {
   } catch {
     data = { error: text.slice(0, 300) }
   }
+
+  if (res.status === 401) {
+    const msg = (data as { error?: string } | null)?.error ?? '用户名或密码错误'
+    if (opts.handle401 !== false) {
+      saveToken(null)
+      onUnauthorized?.()
+    }
+    throw new Error(msg)
+  }
+
   if (!res.ok) {
     const msg = (data as { error?: string } | null)?.error ?? `HTTP ${res.status}`
     throw new Error(msg)
@@ -118,7 +179,25 @@ async function req<T>(path: string, init?: RequestInit): Promise<T> {
   return data as T
 }
 
+export interface LoginResult {
+  ok: boolean
+  token: string
+  username: string
+  expiresInHours: number
+}
+
 export const api = {
+  /** 登录成功即写入 token（后续请求自动携带） */
+  login: async (username: string, password: string): Promise<LoginResult> => {
+    const r = await req<LoginResult>(
+      '/login',
+      { method: 'POST', body: JSON.stringify({ username, password }) },
+      { handle401: false },
+    )
+    saveToken(r.token)
+    return r
+  },
+
   overview: () => req<Overview>('/overview'),
   devices: () => req<{ items: DeviceItem[]; onlineThresholdSeconds: number }>('/devices'),
   tasks: (limit = 100) => req<{ items: TaskItem[] }>(`/tasks?limit=${limit}`),

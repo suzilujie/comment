@@ -14,7 +14,7 @@ import com.xfish.comment.agent.data.AgentDb
 import com.xfish.comment.agent.data.LocalState
 import com.xfish.comment.agent.data.TaskRecord
 import com.xfish.comment.agent.net.TaskPackageDto
-import com.xfish.comment.agent.netlink.CityName
+import com.xfish.comment.agent.netlink.RegionName
 import com.xfish.comment.agent.netlink.IpProbe
 import kotlinx.coroutines.delay
 import kotlinx.serialization.json.JsonObject
@@ -98,23 +98,24 @@ object TaskExecutor {
                 Log.w(TAG, "出口 IP 探测失败（代理未连通？）")
                 return finish(Outcome("aborted", Config.Reason.NETWORK, "ip_probe_failed", startedAt = startedAt), task, reporter)
             }
-            // 属地自检：探测不到属地、或与目标城市不符，一律不执行。
+            // 属地自检（**省级**）：探测不到省份、或与目标省份不符，一律不执行。
             // **不回退历史值** —— 那会掩盖代理异常，让评论带着错误属地发出去。
-            if (probe.city.isBlank() || !CityName.matches(probe.city, task.ipCityTarget)) {
+            if (!RegionName.matches(probe.region, task.ipCityTarget)) {
                 Log.w(
                     TAG,
-                    "属地不匹配：探测=${probe.city.ifBlank { "-" }} 目标=${task.ipCityTarget} → 拒绝执行",
+                    "属地不匹配：探测=${probe.region.ifBlank { "-" }}" +
+                        "/${probe.city.ifBlank { "-" }} 目标=${task.ipCityTarget} → 拒绝执行",
                 )
                 return finish(
                     Outcome(
                         "aborted", Config.Reason.IP_MISMATCH,
-                        "probe=${probe.city.ifBlank { "-" }} target=${task.ipCityTarget}",
+                        "probe=${probe.region.ifBlank { "-" }} target=${task.ipCityTarget}",
                         startedAt = startedAt,
                     ),
                     task, reporter,
                 )
             }
-            Log.i(TAG, "属地自检通过：${probe.city}（ip=${probe.ip}）")
+            Log.i(TAG, "属地自检通过：${probe.region}（${probe.city} / ip=${probe.ip}）")
 
             // ── 步骤 2：写前意图落盘（WAL）──
             dao.upsert(

@@ -68,6 +68,20 @@ export interface DispatchConfig {
   unknownOccupiesPostSlot: boolean
 }
 
+export interface AdminConfig {
+  /** 管理台登录用户名（默认 admin） */
+  username: string
+  /** 管理台登录密码（默认 admin） */
+  password: string
+  /**
+   * 签发管理台 token 的 HMAC 密钥。
+   * 改动它会让**所有已登录会话立即失效**（因为签名对不上）。
+   */
+  secret: string
+  /** token 有效期（小时） */
+  tokenTtlHours: number
+}
+
 export interface HeartbeatConfig {
   seconds: number
   jitterRatio: number
@@ -120,6 +134,12 @@ export const config = {
     dir: str('MATERIAL_DIR', 'data/materials'),
     maxMb: int('MATERIAL_MAX_MB', 20),
   },
+  admin: {
+    username: str('ADMIN_USERNAME', 'admin'),
+    password: str('ADMIN_PASSWORD', 'admin'),
+    secret: str('ADMIN_TOKEN_SECRET', 'comment-admin-dev-secret-please-change'),
+    tokenTtlHours: int('ADMIN_TOKEN_TTL_HOURS', 12),
+  } satisfies AdminConfig,
 } as const
 
 export type Config = typeof config

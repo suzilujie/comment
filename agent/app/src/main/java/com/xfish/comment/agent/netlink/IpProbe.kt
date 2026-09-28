@@ -46,12 +46,24 @@ object IpProbe {
         .retryOnConnectionFailure(true)
         .build()
 
+    /** 短超时客户端：仅用于切城过程中的快速校验（见 [probeFast]） */
+    private val fastClient = OkHttpClient.Builder()
+        .connectTimeout(4, TimeUnit.SECONDS)
+        .readTimeout(4, TimeUnit.SECONDS)
+        .build()
+
     private val json = Json { ignoreUnknownKeys = true }
 
     data class Result(
         /** 出口 IPv4（走代理后看到的地址） */
         val ip: String,
-        /** 出口属地城市（可能为空 —— 由后台做最终归一化与匹配） */
+        /**
+         * 出口属地 —— **省级**（如 `浙江`）。
+         * 派单的属地匹配用这个字段（抖音 IP 属地也只到省，市级是多余精度）。
+         * 可能为空（仅拿到纯 IP 的端点），由调用方判定。
+         */
+        val region: String,
+        /** 出口城市（仅用于日志 / 排障，不参与匹配） */
         val city: String,
         /** 是否检测到 IPv6 直连泄露 */
         val ipv6Leak: Boolean,
@@ -59,46 +71,75 @@ object IpProbe {
         val source: String,
     )
 
-    /** 探测出口身份；全部端点失败返回 null */
+    /** 全量探测出口身份（4 个端点依次尝试）；全部失败返回 null */
     suspend fun probe(): Result? = withContext(Dispatchers.IO) {
         val ipv6Leak = detectIpv6Leak()
-        var withoutCity: Result? = null
+        var withoutRegion: Result? = null
         for (ep in endpoints) {
             try {
-                val body = httpGet(ep.url) ?: continue
-                val (ip, city) = parse(ep.kind, body)
+                val body = httpGet(ep.url, client) ?: continue
+                val (ip, city, region) = parse(ep.kind, body)
                 if (ip.isNullOrBlank()) continue
-                Log.i(TAG, "exit ip=$ip city=${city.ifBlank { "-" }} ipv6Leak=$ipv6Leak via ${ep.name}")
-                val r = Result(ip, city, ipv6Leak, ep.name)
-                // **优先返回带属地的结果**：属地是派单的硬匹配条件。
+                Log.i(
+                    TAG,
+                    "exit ip=$ip region=${region.ifBlank { "-" }} city=${city.ifBlank { "-" }} " +
+                        "ipv6Leak=$ipv6Leak via ${ep.name}",
+                )
+                val r = Result(ip, region, city, ipv6Leak, ep.name)
+                // **优先返回带省份的结果**：省份是派单的硬匹配条件。
                 // 只有纯 IP 的结果先记下作兜底，继续尝试其它端点。
-                if (city.isNotBlank()) return@withContext r
-                if (withoutCity == null) withoutCity = r
+                if (region.isNotBlank()) return@withContext r
+                if (withoutRegion == null) withoutRegion = r
             } catch (e: Exception) {
                 Log.w(TAG, "probe failed via ${ep.name}: ${e.message}")
             }
         }
-        if (withoutCity == null) Log.w(TAG, "all probe endpoints failed (代理未连通？)")
-        withoutCity
+        if (withoutRegion == null) Log.w(TAG, "all probe endpoints failed (代理未连通？)")
+        withoutRegion
     }
 
-    /** 仅探测 IP（切城后快速校验用） */
+    /**
+     * 快速探测：**只试首选端点 + 短超时**，用于切城过程里的即时校验。
+     *
+     * 为什么不复用 [probe]：全量探测最坏 4 端点 × 8 秒 = 32 秒，而切城要连续
+     * 试多个省份，若每次校验都走全量，整个流程会拖到几分钟且毫无收益 ——
+     * 切城只需要知道「新出口通不通、落在哪个省」。
+     */
+    suspend fun probeFast(): Result? = withContext(Dispatchers.IO) {
+        val ipv6Leak = detectIpv6Leak()
+        val ep = endpoints.first()
+        try {
+            val body = httpGet(ep.url, fastClient) ?: return@withContext null
+            val (ip, city, region) = parse(ep.kind, body)
+            if (ip.isNullOrBlank()) return@withContext null
+            Log.i(TAG, "fast exit ip=$ip region=${region.ifBlank { "-" }} via ${ep.name}")
+            Result(ip, region, city, ipv6Leak, ep.name)
+        } catch (e: Exception) {
+            Log.w(TAG, "fast probe failed: ${e.message}")
+            null
+        }
+    }
+
+    /** 仅探测 IP */
     suspend fun probeIp(): String? = probe()?.ip
 
-    private fun parse(kind: String, body: String): Pair<String?, String> = when (kind) {
-        // 各 JSON 源字段名略有差异：ip-api 用 query，其余多用 ip；城市统一取 city
+    /** 解析三元组：ip / 城市 / 省份（regionName 优先，其次 region） */
+    private fun parse(kind: String, body: String): Triple<String?, String, String> = when (kind) {
+        // 各 JSON 源字段名略有差异：ip-api 用 query，其余多用 ip
         "json" -> {
             val obj = runCatching { json.parseToJsonElement(body).jsonObject }.getOrNull()
             val ip = (obj?.get("query") ?: obj?.get("ip"))?.jsonPrimitive?.contentOrNullSafe()
             val city = obj?.get("city")?.jsonPrimitive?.contentOrNullSafe().orEmpty()
-            ip to city
+            val region = obj?.get("regionName")?.jsonPrimitive?.contentOrNullSafe()
+                ?: obj?.get("region")?.jsonPrimitive?.contentOrNullSafe().orEmpty()
+            Triple(ip, city, region)
         }
-        else -> body.trim().takeIf { it.length in 7..45 } to ""
+        else -> Triple(body.trim().takeIf { it.length in 7..45 }, "", "")
     }
 
-    private fun httpGet(url: String): String? {
+    private fun httpGet(url: String, c: OkHttpClient = client): String? {
         val req = Request.Builder().url(url).get().build()
-        client.newCall(req).execute().use { resp ->
+        c.newCall(req).execute().use { resp ->
             if (!resp.isSuccessful) return null
             return resp.body?.string()
         }

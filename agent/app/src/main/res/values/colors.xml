@@ -1,24 +1,35 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <!-- 品牌 -->
+    <!-- ── 品牌 ── -->
     <color name="brand">#3B82F6</color>
     <color name="brand_dim">#2563EB</color>
+    <!-- 品牌色浅底：用于强调块 / 选中态 -->
+    <color name="brand_soft">#1D3A6B</color>
     <color name="on_brand">#FFFFFF</color>
 
-    <!-- 基础 / 表面 -->
+    <!-- ── 表面（深色三级层次：根背景 < 卡片 < 卡片内区块）── -->
+    <color name="bg">#0B1220</color>
+    <color name="card_bg">#131C2E</color>
+    <color name="surface_high">#1A2537</color>
+    <color name="input_bg">#0E1626</color>
+    <color name="stroke">#253148</color>
+    <!-- 更淡的分隔线（列表项之间）-->
+    <color name="stroke_soft">#1C2637</color>
+    <color name="log_bg">#070C15</color>
     <color name="white">#FFFFFF</color>
-    <color name="bg">#0F172A</color>
-    <color name="card_bg">#1E293B</color>
-    <color name="input_bg">#111827</color>
-    <color name="stroke">#334155</color>
-    <color name="log_bg">#0B1120</color>
 
-    <!-- 文字 -->
-    <color name="fg">#E2E8F0</color>
-    <color name="fg_dim">#94A3B8</color>
+    <!-- ── 文字（三级层级：主 / 次 / 辅助）── -->
+    <color name="fg">#E6EDF7</color>
+    <color name="fg_mid">#AEBBCD</color>
+    <color name="fg_dim">#78889F</color>
 
-    <!-- 状态 -->
-    <color name="ok">#4ADE80</color>
-    <color name="warn">#FB923C</color>
+    <!-- ── 状态（每个状态配一个浅底，用于徽标）── -->
+    <color name="ok">#34D399</color>
+    <color name="ok_soft">#0C3A2E</color>
+    <color name="warn">#FBBF24</color>
+    <color name="warn_soft">#3B2B0A</color>
     <color name="err">#F87171</color>
+    <color name="err_soft">#3B1515</color>
+    <color name="info">#60A5FA</color>
+    <color name="info_soft">#12294D</color>
 </resources>

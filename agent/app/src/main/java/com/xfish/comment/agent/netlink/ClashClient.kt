@@ -123,24 +123,53 @@ object ClashClient {
         val all: List<String>,
     )
 
-    /** 读取 group 信息（用于校验存在性与类型，并取节点列表） */
-    suspend fun getGroup(slug: String): GroupInfo? = withContext(Dispatchers.IO) {
-        val raw = request("GET", "/proxies/$slug", null) ?: return@withContext null
-        try {
-            val obj = json.parseToJsonElement(raw).jsonObject
-            GroupInfo(
-                name = obj["name"]?.jsonPrimitive?.contentOrNull() ?: slug,
-                type = obj["type"]?.jsonPrimitive?.contentOrNull() ?: "unknown",
-                now = obj["now"]?.jsonPrimitive?.contentOrNull(),
-                all = obj["all"]?.let { el ->
-                    runCatching { el.jsonArrayToStrings() }.getOrDefault(emptyList())
-                } ?: emptyList(),
-            )
-        } catch (e: Exception) {
-            Log.e(TAG, "getGroup parse failed slug=$slug", e)
-            null
+    /**
+     * 读取 group 的结果 —— **必须区分失败原因**。
+     *
+     * 切城据此决定策略：`ControllerDown` 换多少省份都没用（应当中止），
+     * `GroupMissing` 只是这个省份没配组（换省份可能成功）。
+     * 早期实现把两者都压成 null，导致「控制器没开」也会被当成「换个城市再试」，
+     * 白白空转好几轮。
+     */
+    sealed interface GroupResult {
+        data class Ok(val info: GroupInfo) : GroupResult
+
+        /** 控制器不可达（连接失败 / 非 404 的 HTTP 错误）—— 与目标省份无关 */
+        object ControllerDown : GroupResult
+
+        /** 控制器可达但没有这个 group（404）—— provider 未刷新或组名不符 */
+        object GroupMissing : GroupResult
+    }
+
+    /** 读取 group 信息，区分「控制器不可达」与「group 不存在」 */
+    suspend fun getGroupResult(slug: String): GroupResult = withContext(Dispatchers.IO) {
+        when (val r = requestRaw("GET", "/proxies/$slug", null)) {
+            HttpResult.Unreachable -> GroupResult.ControllerDown
+            is HttpResult.HttpError ->
+                if (r.code == 404) GroupResult.GroupMissing else GroupResult.ControllerDown
+            is HttpResult.Ok -> try {
+                val obj = json.parseToJsonElement(r.body).jsonObject
+                GroupResult.Ok(
+                    GroupInfo(
+                        name = obj["name"]?.jsonPrimitive?.contentOrNull() ?: slug,
+                        type = obj["type"]?.jsonPrimitive?.contentOrNull() ?: "unknown",
+                        now = obj["now"]?.jsonPrimitive?.contentOrNull(),
+                        all = obj["all"]?.let { el ->
+                            runCatching { el.jsonArrayToStrings() }.getOrDefault(emptyList())
+                        } ?: emptyList(),
+                    ),
+                )
+            } catch (e: Exception) {
+                Log.e(TAG, "getGroup parse failed slug=$slug", e)
+                // 响应不是合法 JSON：端口上有服务，但不是 Clash 控制器
+                GroupResult.ControllerDown
+            }
         }
     }
+
+    /** 读取 group 信息（不区分失败原因的便捷版；需要区分时用 [getGroupResult]） */
+    suspend fun getGroup(slug: String): GroupInfo? =
+        (getGroupResult(slug) as? GroupResult.Ok)?.info
 
     /** 检查控制器是否可达（自检用） */
     suspend fun ping(): Boolean = withContext(Dispatchers.IO) {
@@ -184,7 +213,14 @@ object ClashClient {
 
     // ── HTTP 封装 ────────────────────────────────────────────
 
-    private fun request(method: String, path: String, body: String?): String? = try {
+    /** HTTP 结果：区分「连通但报错」与「根本没连上」 */
+    private sealed interface HttpResult {
+        data class Ok(val body: String) : HttpResult
+        data class HttpError(val code: Int) : HttpResult
+        object Unreachable : HttpResult
+    }
+
+    private fun requestRaw(method: String, path: String, body: String?): HttpResult = try {
         val builder = Request.Builder().url(controllerUrl.trimEnd('/') + path)
         if (secret.isNotBlank()) builder.header("Authorization", "Bearer $secret")
         when (method) {
@@ -195,15 +231,18 @@ object ClashClient {
         client.newCall(builder.build()).execute().use { resp ->
             if (!resp.isSuccessful) {
                 Log.w(TAG, "$method $path → ${resp.code}")
-                null
+                HttpResult.HttpError(resp.code)
             } else {
-                resp.body?.string()
+                HttpResult.Ok(resp.body?.string().orEmpty())
             }
         }
     } catch (e: Exception) {
         Log.w(TAG, "$method $path 异常: ${e.message}")
-        null
+        HttpResult.Unreachable
     }
+
+    private fun request(method: String, path: String, body: String?): String? =
+        (requestRaw(method, path, body) as? HttpResult.Ok)?.body
 }
 
 private fun kotlinx.serialization.json.JsonPrimitive.contentOrNull(): String? =

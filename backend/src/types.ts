@@ -49,6 +49,8 @@ export type CommandKind =
   | 'upgrade' // 升级 Agent
   | 'restart'
   | 'refresh_pool' // 重新同步城市池
+  | 'claim_now' // 调试：跳过本机等待，立即领取一次
+  | 'rotate_now' // 调试：跳过轮换周期，立即切城一次
 
 /** 设备可用性（派生量，见 §3.8） */
 export interface DeviceAvailability {

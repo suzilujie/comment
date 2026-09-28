@@ -76,7 +76,11 @@ object SelfCheck {
         val a11y = accessibilityOk(context)
         val nodes = if (a11y && AutoService.douyinForeground()) NodeFinder.dumpSummary(40) else emptyList()
 
-        Log.i(TAG, "自检：a11y=$a11y clash=$clash ip=${ip?.ip ?: "-"} city=${ip?.city ?: "-"}")
+        Log.i(
+            TAG,
+            "自检：a11y=$a11y clash=$clash ip=${ip?.ip ?: "-"} " +
+                "region=${ip?.region ?: "-"} city=${ip?.city ?: "-"}",
+        )
 
         return buildJsonObject {
             put("accessibilityOk", a11y)
@@ -84,6 +88,8 @@ object SelfCheck {
             put("foregroundOk", foregroundOk())
             put("clashReachable", clash)
             put("exitIp", ip?.ip ?: "")
+            // 上报**省级**属地（与派单匹配口径一致）；city 仅作排障辅助
+            put("exitRegion", ip?.region ?: "")
             put("exitCity", ip?.city ?: "")
             put("ipv6Leak", ip?.ipv6Leak ?: false)
             put("probeSource", ip?.source ?: "")
