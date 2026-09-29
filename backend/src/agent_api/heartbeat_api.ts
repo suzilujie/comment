@@ -4,7 +4,8 @@
  * 注意：**心跳不派发任务**——任务走独立的领取接口（2026-09-20 拆分决定）。
  */
 import { Hono } from 'hono'
-import { config } from '../config.js'
+// 心跳间隔读 `settings`（页面可改），见 settings_store
+import { settings } from '../settings/settings_store.js'
 import { createLogger } from '../logger.js'
 import { nowMs, toLocalIso } from '../datetime.js'
 import { HeartbeatRequestSchema } from '../contracts/agent.js'
@@ -43,7 +44,7 @@ route.post('/', async (c) => {
 
   const resp = buildHeartbeatResponse({
     serverTimeMs: nowMs(),
-    nextHeartbeatSeconds: config.heartbeat.seconds,
+    nextHeartbeatSeconds: settings.heartbeat.seconds,
     commands,
     cityPool: pool.length > 0 ? pool : undefined,
     cityPoolVersion: poolVersion || undefined,

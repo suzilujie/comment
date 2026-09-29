@@ -8,7 +8,9 @@
  *
  * 2026-09-26：账号实体移除，配额与节奏下沉到设备维度（一机一号，语义等价）。
  */
-import { config } from '../config.js'
+// 注意：派单参数读的是 `settings` 而不是 `config` —— 前者是"运行时生效值"，
+// 会被管理台「系统设置」页覆盖（优先级：页面设置 > .env > config.ts 默认值）。
+import { settings } from '../settings/settings_store.js'
 import { createLogger } from '../logger.js'
 import { addMinutes, localDateKey, nowMs, parseMs } from '../datetime.js'
 import { randomInt } from '../random.js'
@@ -125,7 +127,7 @@ export async function dispatchTo(
   const candidate = await findDispatchablePost(
     device.id,
     city,
-    config.dispatch.unknownOccupiesPostSlot,
+    settings.dispatch.unknownOccupiesPostSlot,
   )
   if (!candidate) {
     // ⚠ 不再一律回 no_post_available：这个原因码把两种性质完全不同的事混在一起 ——
@@ -134,7 +136,7 @@ export async function dispatchTo(
     const why = await diagnoseNoCandidate(
       device.id,
       city,
-      config.dispatch.unknownOccupiesPostSlot,
+      settings.dispatch.unknownOccupiesPostSlot,
     )
     if (why.blockedByMaterial > 0) {
       log.warn(
@@ -177,7 +179,7 @@ export async function dispatchTo(
   // 同理：`checkQuota` 的读与这里的写之间隔着十几次 await，并发下会超发。
   const claimedQuota = (await sql`
     UPDATE devices SET daily_done = daily_done + 1, updated_at = NOW()
-    WHERE id = ${device.id} AND daily_done < ${config.dispatch.dailyQuotaPerDevice}
+    WHERE id = ${device.id} AND daily_done < ${settings.dispatch.dailyQuotaPerDevice}
     RETURNING daily_done
   `) as unknown as { daily_done: number }[]
   if (claimedQuota.length === 0) {
@@ -279,7 +281,7 @@ export async function dispatchTo(
   }
   log.info(
     `dispatched task=${taskId} device=${device.id} post=${candidate.id} city=${city} ` +
-      `type=${commentType} today=${claimedQuota[0]?.daily_done ?? '-'}/${config.dispatch.dailyQuotaPerDevice}`,
+      `type=${commentType} today=${claimedQuota[0]?.daily_done ?? '-'}/${settings.dispatch.dailyQuotaPerDevice}`,
   )
   return { task: pkg }
 }
@@ -335,7 +337,7 @@ export function eligibleForTask(device: DeviceRow | null): boolean {
     ? null
     : typeof raw === 'string' ? raw.slice(0, 10) : new Date(raw as unknown as string).toISOString().slice(0, 10)
   const done = doneDate === today ? device.daily_done : 0
-  return done < config.dispatch.dailyQuotaPerDevice
+  return done < settings.dispatch.dailyQuotaPerDevice
 }
 
 /** 计算该设备的下次可派单时间（供看板与诊断） */
@@ -343,7 +345,7 @@ export async function nextEligibleAt(deviceId: string): Promise<Date | null> {
   const d = await getDevice(deviceId)
   const next = d?.next_eligible_at ? new Date(d.next_eligible_at) : null
   if (next) return next
-  return addMinutes(nowMs(), randomInt(config.dispatch.intervalMinMinutes, config.dispatch.intervalMaxMinutes))
+  return addMinutes(nowMs(), randomInt(settings.dispatch.intervalMinMinutes, settings.dispatch.intervalMaxMinutes))
 }
 
 /** 未派单结果构造（便于单测与调试） */

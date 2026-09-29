@@ -76,3 +76,23 @@ export function tokenOf(header: string | undefined | null): string | null {
   const m = /^Bearer\s+(.+)$/i.exec(header.trim())
   return m?.[1]?.trim() || null
 }
+
+/**
+ * 从 token 里取出用户名（**只用于审计留痕**，不承担鉴权职责 —— 鉴权一律走 verify()）。
+ *
+ * 存在的意义：改设置这类动作必须能回答"是谁改的"。若把 actor 写死成 'admin'，
+ * 将来多用户时审计记录就失去意义了。签名不对/无法解析时返回 null。
+ */
+export function userOf(token: string | null | undefined): string | null {
+  if (!token) return null
+  const dot = token.lastIndexOf('.')
+  if (dot <= 0) return null
+  const payloadB64 = token.slice(0, dot)
+  if (sign(payloadB64) !== token.slice(dot + 1)) return null
+  try {
+    const payload = JSON.parse(Buffer.from(payloadB64, 'base64url').toString('utf8')) as TokenPayload
+    return typeof payload.u === 'string' ? payload.u : null
+  } catch {
+    return null
+  }
+}

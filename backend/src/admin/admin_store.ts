@@ -15,6 +15,8 @@ import { existsSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
 import { db } from '../db_pg.js'
 import { config } from '../config.js'
+// 在线判定阈值随「系统设置」页可变，所以读运行时生效值
+import { settings } from '../settings/settings_store.js'
 import { localDateKey } from '../datetime.js'
 import { createLogger } from '../logger.js'
 import { getPost } from '../post/post_store.js'
@@ -51,7 +53,7 @@ export async function getOverview(): Promise<Overview> {
     SELECT
       (SELECT COUNT(*)::int FROM devices) AS devices_total,
       (SELECT COUNT(*)::int FROM devices
-         WHERE last_seen_at > NOW() - ${`${config.heartbeat.onlineThresholdSeconds} seconds`}::interval
+         WHERE last_seen_at > NOW() - ${`${settings.heartbeat.onlineThresholdSeconds} seconds`}::interval
       ) AS devices_online,
       (SELECT COUNT(*)::int FROM devices WHERE busy_task_id IS NOT NULL) AS devices_busy,
       (SELECT COUNT(*)::int FROM tasks
@@ -78,7 +80,7 @@ export async function getOverview(): Promise<Overview> {
     postsPaused: r.posts_paused ?? 0,
     scriptsEnabled: r.scripts_enabled ?? 0,
     citiesActive: r.cities_active ?? 0,
-    onlineThresholdSeconds: config.heartbeat.onlineThresholdSeconds,
+    onlineThresholdSeconds: settings.heartbeat.onlineThresholdSeconds,
   }
 }
 

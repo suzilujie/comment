@@ -16,7 +16,8 @@
  *   会与派单门控漂移的口径，而漂移的后果是"帖子静默派不出去"这种极难归因的故障。
  */
 import { db } from '../db_pg.js'
-import { config } from '../config.js'
+// 约束读 `settings`（运行时生效值），见 settings_store 的优先级说明
+import { settings } from '../settings/settings_store.js'
 import { inTimeWindow, localDateKey, localMinuteOfDay, nowMs, parseMs } from '../datetime.js'
 import { createLogger } from '../logger.js'
 import type { ConstraintCheck } from '../types.js'
@@ -57,7 +58,7 @@ export async function checkQuota(
   }
   // 第 2 条：日上限
   const done = await ensureDailyCounter(device)
-  if (done >= config.dispatch.dailyQuotaPerDevice) {
+  if (done >= settings.dispatch.dailyQuotaPerDevice) {
     return { pass: false, reason: NO_DISPATCH_REASONS.ACCOUNT_DAILY_QUOTA, retryAfterSeconds: 1800 }
   }
   // 第 3 条：与上次「完成」的间隔（服务端权威）
@@ -95,7 +96,7 @@ export async function ensureDailyCounter(device: DeviceRow): Promise<number> {
 /** 17：投放时段窗口（深夜发评论是极明显的异常特征） */
 export function checkTimeWindow(): ConstraintCheck {
   const minute = localMinuteOfDay()
-  const ok = inTimeWindow(minute, config.dispatch.windowStartMinute, config.dispatch.windowEndMinute)
+  const ok = inTimeWindow(minute, settings.dispatch.windowStartMinute, settings.dispatch.windowEndMinute)
   return ok ? { pass: true } : { pass: false, reason: NO_DISPATCH_REASONS.OUTSIDE_TIME_WINDOW }
 }
 
@@ -105,10 +106,10 @@ export async function checkGlobalDensity(): Promise<ConstraintCheck> {
   const sql = db()
   const rows = (await sql`
     SELECT COUNT(*)::int AS n FROM dispatch_tokens
-    WHERE created_at > NOW() - ${`${config.dispatch.globalWindowSeconds} seconds`}::interval
+    WHERE created_at > NOW() - ${`${settings.dispatch.globalWindowSeconds} seconds`}::interval
   `) as unknown as { n: number }[]
   const n = rows[0]?.n ?? 0
-  return n < config.dispatch.globalLimit
+  return n < settings.dispatch.globalLimit
     ? { pass: true }
     : { pass: false, reason: NO_DISPATCH_REASONS.GLOBAL_DENSITY }
 }
@@ -122,7 +123,7 @@ export async function recordDispatch(deviceId: string, city: string | null): Pro
   // 顺手清理过期 token，避免表无限增长
   await sql`
     DELETE FROM dispatch_tokens
-    WHERE created_at < NOW() - ${`${config.dispatch.globalWindowSeconds * 4} seconds`}::interval
+    WHERE created_at < NOW() - ${`${settings.dispatch.globalWindowSeconds * 4} seconds`}::interval
   `
 }
 
@@ -154,7 +155,7 @@ export async function checkPostPacing(postId: string): Promise<ConstraintCheck> 
   `) as unknown as { last_comment_at: Date | null }[]
   const last = parseMs(rows[0]?.last_comment_at ?? null)
   if (last === null) return { pass: true }
-  const minGapMs = config.dispatch.perPostMinIntervalMinutes * 60_000
+  const minGapMs = settings.dispatch.perPostMinIntervalMinutes * 60_000
   return nowMs() - last >= minGapMs ? { pass: true } : { pass: false, reason: 'post_pacing' }
 }
 

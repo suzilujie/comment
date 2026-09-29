@@ -12,7 +12,8 @@
 import { db } from '../db_pg.js'
 import { emit, EVENTS } from '../bus.js'
 import { createLogger } from '../logger.js'
-import { config } from '../config.js'
+// 回执超时 / 完成间隔读 `settings`（运行时生效值），见 settings_store 的优先级说明
+import { settings } from '../settings/settings_store.js'
 // 注：`countTodayDone` / `countDevicePostComments` 已删除（2026-09-29）。
 // 它们是"把约束下推到一条 SQL"（findDispatchablePost）之前的旧实现，全仓无调用方，
 // 却各自带着**与派单口径不一致**的写法（一个算"成功数"、一个写死"永久一次"）。
@@ -83,7 +84,7 @@ export function newTaskId(): string {
 export async function createTask(input: CreateTaskInput): Promise<TaskRow> {
   const sql = db()
   const id = input.id ?? makeId('task')
-  const deadline = addMinutes(nowMs(), config.dispatch.receiptTimeoutMinutes)
+  const deadline = addMinutes(nowMs(), settings.dispatch.receiptTimeoutMinutes)
 
   await sql`
     INSERT INTO tasks (id, device_id, post_id, status, script_text, script_id,
@@ -213,8 +214,8 @@ export async function finishTask(
           total_unknown = GREATEST(total_unknown - ${unknownDelta}, 0),
           fail_streak = 0,
           next_eligible_at = ${new Date(finishedAt + randomInt(
-            config.dispatch.intervalMinMinutes,
-            config.dispatch.intervalMaxMinutes,
+            settings.dispatch.intervalMinMinutes,
+            settings.dispatch.intervalMaxMinutes,
           ) * 60_000)},
           updated_at = NOW()
         WHERE id = ${task.device_id}

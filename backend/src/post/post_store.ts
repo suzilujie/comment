@@ -4,7 +4,8 @@
  */
 import { db } from '../db_pg.js'
 import { createLogger } from '../logger.js'
-import { config } from '../config.js'
+// 派单口径读 `settings`（运行时生效值），见 settings_store 的优先级说明
+import { settings } from '../settings/settings_store.js'
 import { randomInt } from '../random.js'
 
 const log = createLogger('post')
@@ -60,7 +61,7 @@ export async function listCandidatePosts(city: string, limit = 20): Promise<Post
       AND p.city = ${city}
       AND (
         p.last_comment_at IS NULL
-        OR p.last_comment_at < NOW() - ${`${config.dispatch.perPostMinIntervalMinutes} minutes`}::interval
+        OR p.last_comment_at < NOW() - ${`${settings.dispatch.perPostMinIntervalMinutes} minutes`}::interval
       )
       AND (
         SELECT COUNT(*) FROM tasks t
@@ -162,11 +163,11 @@ export interface DispatchCandidate {
  * 现在把全部约束下推到一条 SQL（全部是 EXISTS / 标量子查询，PostgreSQL 可以走索引）：
  *  · 12/13 帖有余量（用 `committed` 计数，与原子占位同一口径）
  *  · 14   单帖节奏：与上次成功评论拉开间隔，且该帖当前**没有在途任务**
- *  · 4    同设备 × 同帖**冷却**（默认「当天一次」，见 config.dispatch.devicePostCooldownDays）
+ *  · 4    同设备 × 同帖**冷却**（默认「当天一次」，见 settings.dispatch.devicePostCooldownDays）
  *  · 15   还有未使用的话术；若本次需要配图，还必须有未使用的图片
  *  · 形态 1/4 图文配比（口径同 `decideCommentType`，含 unknown 计占用）
  *
- * @param unknownOccupiesPostSlot 同 `config.dispatch.unknownOccupiesPostSlot`
+ * @param unknownOccupiesPostSlot 同 `settings.dispatch.unknownOccupiesPostSlot`
  */
 export async function findDispatchablePost(
   deviceId: string,
@@ -193,7 +194,7 @@ export async function findDispatchablePost(
         --   「单帖的 10–15 条不可在 1 分钟内集中发完，需拉开发布间隔」要避免的。
         AND (
           p.last_comment_at IS NULL
-          OR p.last_comment_at < NOW() - ${`${config.dispatch.perPostMinIntervalMinutes} minutes`}::interval
+          OR p.last_comment_at < NOW() - ${`${settings.dispatch.perPostMinIntervalMinutes} minutes`}::interval
         )
         AND NOT EXISTS (
           SELECT 1 FROM tasks t4
@@ -215,9 +216,9 @@ export async function findDispatchablePost(
               OR (${unknownOccupiesPostSlot} AND t2.status = 'unknown')
             )
             AND (
-              ${config.dispatch.devicePostCooldownDays}::int <= 0
+              ${settings.dispatch.devicePostCooldownDays}::int <= 0
               OR (t2.dispatched_at AT TIME ZONE 'Asia/Shanghai')::date
-                 > (NOW() AT TIME ZONE 'Asia/Shanghai')::date - ${config.dispatch.devicePostCooldownDays}::int
+                 > (NOW() AT TIME ZONE 'Asia/Shanghai')::date - ${settings.dispatch.devicePostCooldownDays}::int
             )
         )
         -- 15：必须还有未使用的话术
@@ -327,7 +328,7 @@ export async function diagnoseNoCandidate(
       --    ① 单帖节奏（与上次成功评论的间隔）
       AND (
         p.last_comment_at IS NULL
-        OR p.last_comment_at < NOW() - ${`${config.dispatch.perPostMinIntervalMinutes} minutes`}::interval
+        OR p.last_comment_at < NOW() - ${`${settings.dispatch.perPostMinIntervalMinutes} minutes`}::interval
       )
       --    ② 该帖当前没有在途任务
       AND NOT EXISTS (
@@ -341,9 +342,9 @@ export async function diagnoseNoCandidate(
           AND (t2.status IN ('succeeded', 'dispatched', 'executing')
                OR (${unknownOccupiesPostSlot} AND t2.status = 'unknown'))
           AND (
-            ${config.dispatch.devicePostCooldownDays}::int <= 0
+            ${settings.dispatch.devicePostCooldownDays}::int <= 0
             OR (t2.dispatched_at AT TIME ZONE 'Asia/Shanghai')::date
-               > (NOW() AT TIME ZONE 'Asia/Shanghai')::date - ${config.dispatch.devicePostCooldownDays}::int
+               > (NOW() AT TIME ZONE 'Asia/Shanghai')::date - ${settings.dispatch.devicePostCooldownDays}::int
           )
       )
   `) as unknown as { posts_in_city: number; blocked_by_material: number }[]
@@ -392,5 +393,5 @@ export async function countMaterials(): Promise<{ scripts: number; images: numbe
 
 /** 随机等待时长（用于人工工具/测试数据生成） */
 export function randomIntervalMinutes(): number {
-  return randomInt(config.dispatch.intervalMinMinutes, config.dispatch.intervalMaxMinutes)
+  return randomInt(settings.dispatch.intervalMinMinutes, settings.dispatch.intervalMaxMinutes)
 }

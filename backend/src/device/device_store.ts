@@ -5,7 +5,8 @@
 import { db } from '../db_pg.js'
 import { emit, EVENTS } from '../bus.js'
 import { createLogger } from '../logger.js'
-import { config } from '../config.js'
+// 在线判定阈值读 `settings`（页面可改），见 settings_store
+import { settings } from '../settings/settings_store.js'
 import { nowMs, parseMs } from '../datetime.js'
 import type { AdminState, DeviceAvailability } from '../types.js'
 import type { HeartbeatRequest } from '../contracts/agent.js'
@@ -59,7 +60,7 @@ export async function applyHeartbeat(req: HeartbeatRequest): Promise<DeviceRow> 
   const wasOnline =
     prev !== null &&
     prevSeenMs !== null &&
-    nowMs() - prevSeenMs <= config.heartbeat.offlineAlertThresholdSeconds * 1000
+    nowMs() - prevSeenMs <= settings.heartbeat.offlineAlertThresholdSeconds * 1000
 
   const s = req.state
   // ⚠ UPSERT 直接 RETURNING * ：原实现写完之后又 `getDevice` 查了一次，
@@ -129,7 +130,7 @@ export async function applyHeartbeat(req: HeartbeatRequest): Promise<DeviceRow> 
 export function isOnline(device: DeviceRow): boolean {
   const seen = parseMs(device.last_seen_at)
   if (seen === null) return false
-  return nowMs() - seen <= config.heartbeat.onlineThresholdSeconds * 1000
+  return nowMs() - seen <= settings.heartbeat.onlineThresholdSeconds * 1000
 }
 
 /** 派生可用性：设备报事实，后台算准入（§3.8 第 5 条原则） */
@@ -186,7 +187,7 @@ function deviceWhere(f: DeviceFilter) {
   const sql = db()
   const parts = [sql`TRUE`]
   if (f.online !== undefined) {
-    const online = sql`(last_seen_at IS NOT NULL AND last_seen_at >= NOW() - ${config.heartbeat.onlineThresholdSeconds} * INTERVAL '1 second')`
+    const online = sql`(last_seen_at IS NOT NULL AND last_seen_at >= NOW() - ${settings.heartbeat.onlineThresholdSeconds} * INTERVAL '1 second')`
     parts.push(f.online ? online : sql`NOT ${online}`)
   }
   if (f.health === 'ok') {

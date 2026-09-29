@@ -247,6 +247,28 @@ CREATE TABLE IF NOT EXISTS dispatch_tokens (
 );
 CREATE INDEX IF NOT EXISTS idx_dispatch_tokens_time ON dispatch_tokens (created_at DESC);
 
+-- ── 系统设置（管理台「系统设置」页写入；覆盖 .env 的默认值） ──────
+-- 只存**被页面改过**的键 —— 没有行 = 用 .env / config.ts 的默认值。
+-- 这样"页面上没动过的参数"永远跟随 .env，运维不会遇到"改 .env 不生效"。
+CREATE TABLE IF NOT EXISTS settings (
+  key        TEXT PRIMARY KEY,                     -- 形如 dispatch.intervalMinMinutes
+  value      JSONB NOT NULL,                      -- 标量（number / boolean）
+  updated_by TEXT,                                -- 改它的管理员用户名
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- 变更留痕：节奏类参数（间隔、密度、时段）改错会直接导致
+-- 「评论在同一分钟内集中发出」这种账号风险，必须能回答"什么时候被谁改成了什么"。
+CREATE TABLE IF NOT EXISTS settings_history (
+  id         SERIAL PRIMARY KEY,
+  key        TEXT NOT NULL,
+  old_value  JSONB,
+  new_value  JSONB,
+  actor      TEXT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_settings_history_time ON settings_history (created_at DESC);
+
 -- ── 增量列迁移（2026-09-29）────────────────────────────────────
 -- ⚠ 为什么必须写在这里：`ensureSchema()` 是「整个文件 unsafe 执行」，
 --   而上面用的是 `CREATE TABLE IF NOT EXISTS` —— 对**已存在**的表，改 CREATE 语句

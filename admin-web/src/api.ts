@@ -61,6 +61,8 @@ export interface Overview {
 
 export interface DeviceItem {
   id: string
+  /** 设备名（设备端「设置 → 设备名称」录入；未录入时为 null） */
+  name: string | null
   admin_state: string
   last_seen_at: string | null
   last_ip: string | null
@@ -249,6 +251,53 @@ export interface LoginResult {
 export interface Paged<T> {
   items: T[]
   total: number
+}
+
+// ── 系统设置（管理台「系统设置」页）────────────────────────────
+// 优先级：**页面设置 > .env > config.ts 默认值**。页面没动过的键库里没有行，跟随 .env。
+
+export type SettingKind = 'int' | 'bool' | 'time'
+export type SettingGroup = 'dispatch' | 'heartbeat'
+
+/** 一项可配置参数：当前值 + 来源 + 边界（边界由后端 SETTING_DEFS 给出，前端据此预校验） */
+export interface SettingItem {
+  key: string
+  group: SettingGroup
+  label: string
+  hint: string
+  /** time 的 value 是「当天第几分钟」，页面用 HH:MM 显示 */
+  kind: SettingKind
+  min: number | null
+  max: number | null
+  value: number | boolean
+  /** db = 页面上设置过（覆盖 .env）；env = 跟随 .env / 默认值 */
+  source: 'db' | 'env'
+  /** 同一个键在 .env / config.ts 里的值 */
+  envValue: number | boolean
+  /** 是否已被页面覆盖（= 与 envValue 不同） */
+  overridden: boolean
+}
+
+export interface SettingHistoryItem {
+  key: string
+  old_value: number | boolean | null
+  new_value: number | boolean | null
+  actor: string | null
+  created_at: string
+}
+
+export interface SettingsResponse {
+  items: SettingItem[]
+  /** 只读环境信息（端口 / 连接池 / 目录…）：排障要看，但不适合在页面上改 */
+  readonly: { label: string; value: string }[]
+  history: SettingHistoryItem[]
+}
+
+/** 保存/恢复结果：校验失败时 detail.errors 逐字段给出原因 */
+export interface SettingsSaveResult {
+  ok: boolean
+  error?: string
+  detail?: { errors?: Record<string, string>; changed?: number; reset?: string[] }
 }
 
 export interface PageQuery {
@@ -458,6 +507,22 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ kind, payload }),
     }),
+
+  // ── 系统设置 ──────────────────────────────────────────────
+
+  settings: () => req<SettingsResponse>('/settings'),
+
+  /**
+   * 保存设置。**只传改动过的键**：
+   * 后端按「当前生效值 + 本次提交」合成视图做互斥校验，所以传全量或增量都安全，
+   * 但传增量能让审计记录（settings_history）里只有真正变化的那几项。
+   */
+  saveSettings: (values: Record<string, number | boolean>) =>
+    req<SettingsSaveResult>('/settings', { method: 'PUT', body: JSON.stringify({ values }) }),
+
+  /** keys 传空数组 = 恢复全部默认（删掉库里的覆盖，回到 .env / config 默认值） */
+  resetSettings: (keys: string[] = []) =>
+    req<SettingsSaveResult>('/settings/reset', { method: 'POST', body: JSON.stringify({ keys }) }),
 }
 
 // ── 展示格式化 ─────────────────────────────────────────────

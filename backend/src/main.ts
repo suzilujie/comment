@@ -12,6 +12,7 @@ import { Hono } from 'hono'
 import type { Context, Next } from 'hono'
 import { serveStatic } from 'hono/bun'
 import { config, configWarnings } from './config.js'
+import { loadSettings, settings } from './settings/settings_store.js'
 import { createLogger } from './logger.js'
 import { on, EVENTS } from './bus.js'
 import { closePg, ensureSchema, ping } from './db_pg.js'
@@ -28,6 +29,11 @@ import receiptRoute from './agent_api/receipt_api.js'
 
 const log = createLogger('main')
 const app = new Hono()
+
+/** 「当天第几分钟」→ "HH:MM"（启动日志用，与页面上的写法一致） */
+function minuteText(m: number): string {
+  return `${String(Math.floor(m / 60)).padStart(2, '0')}:${String(m % 60).padStart(2, '0')}`
+}
 
 // 启动期配置告警（见 config.ts 的 configWarnings）。
 // 这些配置问题**不会让进程起不来**，只会在运行时表现成"说不通的怪现象"
@@ -141,7 +147,7 @@ app.get('/health', async (c) => {
       ok: dbOk,
       db: dbOk,
       serverTimeMs: Date.now(),
-      heartbeatSeconds: config.heartbeat.seconds,
+      heartbeatSeconds: settings.heartbeat.seconds,
       port: config.server.port,
     },
     dbOk ? 200 : 503,
@@ -160,7 +166,7 @@ app.get('/api/devices', requireAdmin, async (c) => {
     items: items.map((d) => {
       const seen = d.last_seen_at ? new Date(d.last_seen_at).getTime() : null
       const gapSec = seen === null ? null : Math.floor((now - seen) / 1000)
-      const online = gapSec !== null && gapSec <= config.heartbeat.onlineThresholdSeconds
+      const online = gapSec !== null && gapSec <= settings.heartbeat.onlineThresholdSeconds
       return { ...d, online, lastSeenGapSec: gapSec }
     }),
   })
@@ -216,14 +222,27 @@ if (!(await ping())) {
   log.error('数据库不可达：服务仍会启动，但设备接口将报错。请检查 .env 的 PG_URL。')
 }
 
+// 系统设置要在 startScheduler 之前加载：调度器与设备接口都读 settings 的生效值。
+// 顺序是「模块加载时先套用 .env 默认值 → 这里再用库里的覆盖值覆盖」，
+// 所以下面这行打出来的就是**当前真正生效**的参数（含页面上改过的）。
+const loadedSettings = await loadSettings()
+
 startScheduler()
 
 log.info(`backend listening on http://${config.server.host}:${config.server.port}`)
-log.info(`heartbeat=${config.heartbeat.seconds}s quota/day=${config.dispatch.dailyQuotaPerDevice} ` +
-  `interval=${config.dispatch.intervalMinMinutes}-${config.dispatch.intervalMaxMinutes}min ` +
-  `window=${config.dispatch.windowStartMinute}-${config.dispatch.windowEndMinute}(local minute of day)`)
-// 把关键容量参数打出来：200 台规模下「连接池被 .env 里的旧值覆盖」是很容易漏的坑
-// （改 config.ts 默认值不等于生效 —— .env 优先），启动时显式确认一次。
+log.info(
+  `生效参数：心跳=${settings.heartbeat.seconds}s 在线判定=${settings.heartbeat.onlineThresholdSeconds}s ` +
+    `单设备日上限=${settings.dispatch.dailyQuotaPerDevice} ` +
+    `完成间隔=${settings.dispatch.intervalMinMinutes}-${settings.dispatch.intervalMaxMinutes}min ` +
+    `投放窗口=${minuteText(settings.dispatch.windowStartMinute)}-${minuteText(settings.dispatch.windowEndMinute)} ` +
+    `单帖间隔=${settings.dispatch.perPostMinIntervalMinutes}min ` +
+    `同帖冷却=${settings.dispatch.devicePostCooldownDays}天`,
+)
+// 把关键参数打出来：这个系统吃过「改了 config.ts 默认值却因为 .env 优先而不生效」的亏。
+// 现在多了一层"页面设置"，所以更要把**谁在起作用**说清楚，否则同一类坑会再踩一次。
+log.info(
+  `（其中 ${loadedSettings.overrides} 项来自管理台「系统设置」页；未被页面覆盖的跟随 .env / 默认值）`,
+)
 log.info(`pg pool=${config.pg.poolMax} statement_timeout=${
   process.env.PG_STATEMENT_TIMEOUT_MS ?? '15000(default)'}ms`)
 

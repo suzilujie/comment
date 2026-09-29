@@ -6,7 +6,8 @@
  *  2. 设备离线检测 → 写 device_events + 发告警；
  *  3. 城市池计数刷新（供设备端随机选择与空跑统计）。
  */
-import { config } from './config.js'
+// 离线阈值 / 设置重载都走 `settings`（运行时生效值，页面可改）
+import { loadSettings, settings } from './settings/settings_store.js'
 import { createLogger } from './logger.js'
 import { emit, EVENTS } from './bus.js'
 import { db } from './db_pg.js'
@@ -50,7 +51,7 @@ export async function scanOfflineDevices(): Promise<number> {
     WHERE d.admin_state <> 'disabled'
       AND d.presence <> 'offline'
       AND (d.last_seen_at IS NULL
-           OR d.last_seen_at < NOW() - ${`${config.heartbeat.offlineAlertThresholdSeconds} seconds`}::interval)
+           OR d.last_seen_at < NOW() - ${`${settings.heartbeat.offlineAlertThresholdSeconds} seconds`}::interval)
   `) as unknown as {
     id: string
     last_seen_at: Date | null
@@ -63,7 +64,7 @@ export async function scanOfflineDevices(): Promise<number> {
   for (const d of rows) {
     const seen = parseMs(d.last_seen_at)
     const gapSec = seen === null ? Number.POSITIVE_INFINITY : Math.floor((now - seen) / 1000)
-    const manual = gapSec >= config.heartbeat.offlineManualThresholdSeconds
+    const manual = gapSec >= settings.heartbeat.offlineManualThresholdSeconds
 
     // ⚠ 只在 online → offline 的**状态迁移**时写事件与告警。
     // 早期是「每个离线设备每 30 秒无条件 INSERT 一条」—— 40 台离线 = 11.5 万条/天
@@ -160,6 +161,9 @@ export function startScheduler(): void {
           // 对账计数：派单是「先占位、再建任务」的两步非事务操作，
           // 中间崩溃会让 posts.committed / devices.daily_done 永久虚高（见 reconcileCounters）。
           await reconcileCounters()
+          // 重载系统设置。单进程下保存时已即时生效，这一步是为了将来多实例部署时
+          // 另一台实例的页面改动也能在 5 分钟内收敛（否则它就永远用着旧参数）。
+          await loadSettings()
         }
         if (tick % 2880 === 0) await pruneHistory() // 30s × 2880 = 24 小时
       } catch (e) {

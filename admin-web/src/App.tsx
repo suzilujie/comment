@@ -8,6 +8,7 @@ import Materials from './pages/Materials'
 import Overview from './pages/Overview'
 import Posts from './pages/Posts'
 import Scripts from './pages/Scripts'
+import Settings from './pages/Settings'
 import Tasks from './pages/Tasks'
 import { getToken, logout, setUnauthorizedHandler } from './api'
 import { Btn, ToastHost, useToasts } from './ui'
@@ -22,6 +23,7 @@ const TABS = [
   { key: 'cities', label: '省份池' },
   { key: 'commands', label: '指令' },
   { key: 'events', label: '事件流' },
+  { key: 'settings', label: '系统设置' },
 ] as const
 
 type TabKey = (typeof TABS)[number]['key']
@@ -50,7 +52,7 @@ export default function App() {
         <div>
           <h1 className="text-lg font-semibold text-slate-100">评论投放 · 管理台</h1>
           <p className="mt-0.5 text-xs text-slate-500">
-            监控：概览 / 设备 / 任务 / 事件流 · 配置：帖子池 / 素材 / 话术 / 省份池 · 运维：指令下发
+            监控：概览 / 设备 / 任务 / 事件流 · 配置：帖子池 / 素材 / 话术 / 省份池 · 运维：指令下发 / 系统设置
           </p>
         </div>
         <div className="flex items-center gap-2">
@@ -106,6 +108,7 @@ export default function App() {
         {tab === 'cities' && <Cities {...common} />}
         {tab === 'commands' && <Commands {...common} />}
         {tab === 'events' && <Events {...common} />}
+        {tab === 'settings' && <Settings {...common} />}
       </main>
 
       <footer className="pb-4 text-center text-[11px] text-slate-600">

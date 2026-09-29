@@ -12,10 +12,18 @@ import { mkdirSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { Hono } from 'hono'
 import { config } from '../config.js'
+// 在线判定阈值随「系统设置」页可变，所以读运行时生效值
+import { settings } from '../settings/settings_store.js'
 import { countDevices, listDevices } from '../device/device_store.js'
 import type { DeviceFilter } from '../device/device_store.js'
 import { countTasks, listTasks } from '../task/task_store.js'
-import { login, tokenOf, verify } from './admin_auth.js'
+import { login, tokenOf, userOf, verify } from './admin_auth.js'
+import {
+  listSettingsHistory,
+  resetSettings,
+  saveSettings,
+  settingsView,
+} from '../settings/settings_store.js'
 import {
   countCities,
   countCommands,
@@ -137,12 +145,12 @@ admin.get('/devices', async (c) => {
       const gapSec = seen === null ? null : Math.floor((now - seen) / 1000)
       return {
         ...d,
-        online: gapSec !== null && gapSec <= config.heartbeat.onlineThresholdSeconds,
+        online: gapSec !== null && gapSec <= settings.heartbeat.onlineThresholdSeconds,
         lastSeenGapSec: gapSec,
       }
     }),
     total,
-    onlineThresholdSeconds: config.heartbeat.onlineThresholdSeconds,
+    onlineThresholdSeconds: settings.heartbeat.onlineThresholdSeconds,
   })
 })
 
@@ -435,6 +443,38 @@ admin.post('/devices/:id/commands', async (c) => {
       : undefined
   const r = await sendCommand(c.req.param('id'), kind as Command['kind'], payload)
   return c.json(r, r.ok ? 200 : 404)
+})
+
+// ── 系统设置 ────────────────────────────────────────────────
+// 这些参数过去只能改 .env 再重启后台；现在页面可改，落库覆盖 .env。
+// 优先级：数据库覆盖值 > .env > config.ts 默认值（见 settings_store 的说明）。
+
+/** 当前操作者（只用于审计留痕；鉴权仍由上面的中间件负责） */
+function actorOf(c: { req: { header: (k: string) => string | undefined } }): string {
+  return userOf(tokenOf(c.req.header('Authorization'))) ?? 'unknown'
+}
+
+admin.get('/settings', async (c) => {
+  const [view, history] = await Promise.all([settingsView(), listSettingsHistory(20)])
+  return c.json({ ...view, history })
+})
+
+admin.put('/settings', async (c) => {
+  const body = (await c.req.json().catch(() => ({}))) as Record<string, unknown>
+  const values = body.values
+  if (values === null || typeof values !== 'object' || Array.isArray(values)) {
+    return c.json({ ok: false, error: 'values 必须是一个对象（键为设置项，值为新取值）' }, 400)
+  }
+  const r = await saveSettings(values as Record<string, unknown>, actorOf(c))
+  return c.json(r, r.ok ? 200 : 400)
+})
+
+admin.post('/settings/reset', async (c) => {
+  const body = (await c.req.json().catch(() => ({}))) as Record<string, unknown>
+  const raw = body.keys
+  const keys = Array.isArray(raw) ? raw.filter((k): k is string => typeof k === 'string') : []
+  const r = await resetSettings(keys, actorOf(c))
+  return c.json(r, r.ok ? 200 : 400)
 })
 
 export default admin
