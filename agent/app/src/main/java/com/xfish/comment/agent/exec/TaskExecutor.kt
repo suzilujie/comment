@@ -3,6 +3,7 @@ package com.xfish.comment.agent.exec
 import android.content.Context
 import android.graphics.Rect
 import android.net.Uri
+import android.view.accessibility.AccessibilityNodeInfo
 import com.xfish.comment.agent.accessibility.Actions
 import com.xfish.comment.agent.accessibility.AutoService
 import com.xfish.comment.agent.accessibility.Human
@@ -281,7 +282,22 @@ object TaskExecutor {
             // 抖音评论正文/昵称不暴露给无障碍服务（2026-09-26 实测：整页 dump 仅 212 个节点、
             // 无任何评论文本、无昵称），"读到自己的评论"基本不可命中；
             // 因此把可读的「评论数」作为提交成功的第二判据（发送后 +1）。
-            val commentCountBefore = readCommentCount()
+            // 读不到时**先把评论面板真正打开再读一次**：
+            //   步骤 8 判断"面板是否已展开"用的是输入框占位文案，而**折叠态底栏与展开态编辑框
+            //   的占位文案完全相同**（实测都是「发条评论，和大家一起讨论」）—— 面板其实没展开
+            //   也会判成"已展开"并跳过打开动作，于是评论列表从未加载、评论数基线恒为 null，
+            //   「评论数 +1」这条**唯一**可用的正向证据直接作废
+            //   （实测 2026-09-28：0 评论视频的纯文字评论明明发出去了，却判 unknown）。
+            //   面板是否真的展开，用「放大评论区/缩小评论区」这个**只在面板存在时才出现**的按钮判断。
+            var commentCountBefore = readCommentCount()
+            if (commentCountBefore == null &&
+                NodeFinder.containsAny(listOf("放大评论区", "缩小评论区")) == null
+            ) {
+                Log.i(TAG, "评论数基线读不到，尝试打开评论面板后重读")
+                NodeFinder.find(DouyinLocators.commentEntry)?.let { Actions.click(it) }
+                delay(Rnd.long(900, 1_600))
+                commentCountBefore = readCommentCount()
+            }
             Log.i(TAG, "发送前评论数基线=$commentCountBefore")
 
             // ── 步骤 8.6：图文评论 → 贴图（**发送前必须完成**）──
@@ -537,8 +553,13 @@ object TaskExecutor {
             )
         }
 
-        // ④ 校验：缩略图 / 「同时发布为作品」出现，才算真的贴上了
-        if (NodeFinder.waitFor(DouyinLocators.commentImageAttached, timeoutMs = 8_000) == null) {
+        // ④ 校验：编辑框里真的出现了缩略图，才算贴上了。
+        //    ⚠ 判据不能只看「同时发布为作品」—— 只要评论编辑框展开它就存在（实测未贴图时也有），
+        //      那样"贴图失败"会被误判成成功，然后发出一条后台记为图文、实际纯文字的评论
+        //      （正是本次改造要根除的 bug）。也不能只看 desc="关闭"：评论区面板右上角的
+        //      关闭按钮（id:back_btn）描述同样是「关闭」，靠坐标才能区分。
+        val attached = NodeFinder.waitForFirstWhere(timeoutMs = 8_000) { n -> isImageAttachedNode(n) }
+        if (attached == null) {
             logPageDump("贴图后未出现缩略图")
             return Outcome(
                 "aborted", Config.Reason.IMAGE_ATTACH_FAILED, "image_not_attached", startedAt = startedAt,
@@ -557,6 +578,19 @@ object TaskExecutor {
         }
         Log.i(TAG, "✅ 已贴图：素材=${image.hash} 相册条目=$uri")
         return null
+    }
+
+    /**
+     * 判断一个节点是不是「评论上已挂着图片」的证据 —— 即编辑框内那张缩略图右上角的删除按钮。
+     *
+     * 判据 = `desc="关闭"` **且**位于编辑框缩略图区（屏幕左侧、y≈850~1120）。
+     * 坐标约束是必需的：评论区面板自己的关闭按钮（`id:back_btn`）描述同样是「关闭」，
+     * 但它固定在屏幕右上角（x≈959~1069），两者只能靠位置区分。
+     */
+    private fun isImageAttachedNode(n: AccessibilityNodeInfo): Boolean {
+        val d = n.contentDescription?.toString().orEmpty()
+        val r = Rect().also { n.getBoundsInScreen(it) }
+        return d == "关闭" && r.top in 850..1120 && r.left < 400
     }
 
     /**
@@ -731,8 +765,43 @@ object TaskExecutor {
             }
             if (hit != null) return hit
         }
+
+        // 都不命中时，区分「**确定是 0 条**」与「读不到」—— 后者返回 null（不做任何判定）。
+        //
+        // ⚠ 这里是修一个真实缺口（2026-09-28 实测）：抖音在 **0 条评论时不给「评论N」角标**，
+        //    于是基线恒为 null。而「评论数 +1」正是评论正文不可读时**唯一**可用的正向证据，
+        //    基线为 null 等于这条证据直接作废：
+        //      一条 0 评论视频的纯文字评论**明明发出去了**（0→1），
+        //      却因 null->1 无法比较而被判 unknown（保守，但白白多出一条人工核实项）。
+        if (texts.any { s -> ZERO_COMMENT_MARKERS.any { s.contains(it) } } ||
+            texts.any { s -> isCountlessCommentEntry(s) }
+        ) {
+            return 0
+        }
         return null
     }
+
+    /**
+     * 「0 条评论」时才会出现的文案（有评论时不会出现）。
+     *
+     * 面板**真正展开**且一条评论都没有时，列表标题就是「暂无评论」
+     * （真机实测 2026-09-28 / 抖音 39.7.0 / 图文帖：`TextView id:title text="暂无评论"`，
+     *  同屏还有「期待你的评论」「去评论」按钮）；输入框占位「抢首评」是同类信号。
+     */
+    private val ZERO_COMMENT_MARKERS = listOf("暂无评论", "还没有评论", "抢首评")
+
+    /**
+     * 评论入口按钮是否**不含数字** —— 即 0 条评论。
+     *
+     * ⚠ 不能锚定整串去匹配。实测 0 条评论时 uiautomator 给出的 desc 是
+     *   **「评论评论，按钮」**（节点的 contentDescription 与其子节点文本被拼在一起），
+     *   而锚定正则 `^评论，?按钮$` 匹配不上 —— 整个修复会**静默失效**。
+     *   改用「含『评论』且含『按钮』且不含任何数字」的宽松判据：
+     *     · 有评论时是「评论7，按钮」→ 含数字，排除；
+     *     · 其它含「评论」的节点（如「语音评论」「发条评论…」）不含「按钮」→ 排除。
+     */
+    private fun isCountlessCommentEntry(s: String): Boolean =
+        s.contains("评论") && s.contains("按钮") && s.none { it.isDigit() }
 
     /** 评论数是否增加（前后两个值都必须读到，否则视为不可判定 → 不产生正向结论） */
     private fun commentCountGrew(before: Int?, after: Int?): Boolean =
