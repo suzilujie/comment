@@ -229,7 +229,13 @@ object Actions {
         var hit = false
         fun dfs(node: AccessibilityNodeInfo, depth: Int) {
             if (hit || depth > 25) return
-            if (node.isEditable && node.text?.toString().orEmpty().contains(text)) {
+            // 判据必须与 [findFocusedEditable] 一致：只看 `isEditable` 会漏掉「不报 isEditable
+            // 的 EditText」（那正是 findFocusedEditable 要加 `isFocused && EditText` 兜底的原因）。
+            // 一旦漏判，本函数恒返回 false → 第 10 步会**未经确认就认定发送成功**、
+            // 第 11 步的"输入框仍含话术"证据失效，两处判定一起失真。
+            val isEdit = node.isEditable ||
+                node.className?.contains("EditText", true) == true
+            if (isEdit && node.text?.toString().orEmpty().contains(text)) {
                 hit = true
                 return
             }

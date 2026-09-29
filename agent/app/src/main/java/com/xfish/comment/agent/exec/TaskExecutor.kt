@@ -476,7 +476,19 @@ object TaskExecutor {
                     "succeeded", null, "comment_visible", startedAt = startedAt, finishedAt = Time.nowMs(),
                 )
 
-                // 提交未生效（文本仍在输入框）→ 确认未发出
+                // ⚠ **证据冲突**：输入框仍持有本次话术（本地负向）但评论数 +1（平台正向）。
+                //    过去这里直接落 `inputStillHasText -> failed`，而 failed 的语义是"确认未发出"
+                //    —— 后台会退还配额、释放帖子名额 → 同一设备可能被重新派到同一帖；
+                //    可计数明明涨了（平台很可能已接受），于是同帖出现两条评论。
+                //    也不能判 succeeded：并发的真实用户评论同样会让计数 +1，那会虚报成功。
+                //    冲突时只有一个正确选择：**unknown**（不退还、占着名额、转人工核对）。
+                inputStillHasText && countGrew -> Outcome(
+                    "unknown", Config.Reason.VERIFY_FAILED,
+                    "evidence_conflict:input_has_script&count_grew:$commentCountBefore->$countAfter",
+                    startedAt = startedAt, finishedAt = Time.nowMs(),
+                )
+
+                // 提交未生效（文本仍在输入框，且没有任何正向证据）→ 确认未发出
                 inputStillHasText -> Outcome(
                     "failed", Config.Reason.SUBMIT_FAILED, "text_still_in_input",
                     startedAt = startedAt, finishedAt = Time.nowMs(),
@@ -792,17 +804,19 @@ object TaskExecutor {
         sinceMs: Long,
         wasOnDetailBefore: Boolean,
     ): Boolean {
-        val fresh = AutoService.awaitDetailPageSince(sinceMs, 8_000)
-        if (!fresh) {
-            if (wasOnDetailBefore) {
-                Log.w(
-                    TAG,
-                    "短链打开后未出现新的详情页事件，且打开前已在详情页 → 无法确认这就是目标视频，" +
-                        "拒绝发送（宁可失败，也不能把评论发到别的视频上）",
-                )
-                return false
-            }
-            Log.i(TAG, "短链未产生新的详情页事件（可能复用了页面），回退到「当前就在详情页」判据")
+        if (!AutoService.awaitDetailPageSince(sinceMs, 8_000)) {
+            // ⚠ 这里**刻意不做任何兜底**。曾经写过"回退到：找得到评论入口就算通过"，
+            //    那是错的：首页推荐流的视频**同样有评论入口**（2026-09-28 实测：入口确认
+            //    仅 23ms 就"通过"了，当时页面其实是 homepage 的容器），短链失效停在首页时
+            //    兜底必然放行 → 评论发到**随机一个首页视频**上，而且回执还是 succeeded。
+            // 代价："抖音复用同一个 DetailActivity、不产生新窗口事件"时会误判为失败。
+            //    但那只损失一次派单（可重派、退配额），而发错视频是撤不回来的。
+            Log.w(
+                TAG,
+                "短链打开后未出现新的详情页事件（打开短链前${if (wasOnDetailBefore) "已" else "未"}在详情页）" +
+                    "→ 无法确认这就是目标视频，拒绝发送",
+            )
+            return false
         }
         return NodeFinder.waitFor(DouyinLocators.commentEntry, timeoutMs = 3_000) != null
     }

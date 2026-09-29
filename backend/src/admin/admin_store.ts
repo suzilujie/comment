@@ -330,8 +330,11 @@ export async function resetDeviceCounters(deviceId: string): Promise<OpResult> {
  *      一起删了 —— 那台设备会被重新派到同一帖，同帖出现两条评论（撤不回来）；
  *   2. **不同步 `posts.committed`**：派单门控读的是这一列，删了任务行却不减列，名额反而虚高，
  *      帖子**再也派不出去** —— 与"释放名额"的初衷完全相反。
- *   现在改为：只把**在途 / 未知**的任务按 `aborted` 收敛（语义 = 人工确认未发出），
- *   名额、当日配额、素材占用全部由 [finishTask] 原子释放，任务行与事件**保留**（可审计）。
+ *   现在改为：只把**未知（unknown）**、以及**已过回执截止时间或已明确指定设备**的在途任务
+ *   按 `aborted` 收敛（语义 = 人工确认未发出），名额、当日配额、素材占用全部由 [finishTask]
+ *   原子释放，任务行与事件**保留**（可审计）。
+ *   ⚠ 仍在执行且未超期的任务**有意不收敛**：它可能正在另一台设备上发出评论，
+ *   此刻释放名额会导致同帖被重派（见下面的说明）。
  */
 export async function releasePostSlot(
   postId: string,
@@ -343,16 +346,37 @@ export async function releasePostSlot(
   const today = localDateKey()
   const resetPacing = opts.resetPacing !== false
 
-  // 只挑**占着名额、且尚无确定结论**的任务：
-  //  · succeeded 不动 —— 它确实发出去了，删掉会解除防重复护栏
-  //  · failed / aborted 本来就不占名额，动它们没有意义
+  // 只挑「占着名额、且已经不会自己走完」的任务：
+  //  · succeeded 不动 —— 它确实发出去了，动它会解除防重复护栏
+  //  · failed / aborted 本来就不占名额
+  //  · unknown **一定收敛**（这就是本动作的主用例：人工核实过"确实没发出去"）
+  //  · **在途任务（dispatched / executing）默认不动** —— 它可能正在另一台设备上执行。
+  //    把它收敛成 aborted（语义 = 确认未发出）会退还配额、释放名额、删掉素材占位，
+  //    而那条评论稍后很可能真的发出去；等设备回执回来还会被"已终态"挡掉
+  //    → 同一设备被重新派到同一帖 → **同帖两条评论**。
+  //    只有两种情况才算进来：**已过回执截止时间**（这时它本来就该被超时扫描判 unknown），
+  //    或调用方**明确指定了设备**（人工断言"就是这台卡住了"）。
+  const allowInflight = opts.deviceId !== undefined
   const targets = (await sql`
     SELECT id FROM tasks
     WHERE post_id = ${postId}
       AND (dispatched_at AT TIME ZONE 'Asia/Shanghai')::date = ${today}::date
       ${opts.deviceId ? sql`AND device_id = ${opts.deviceId}` : sql``}
-      AND status IN ('dispatched', 'executing', 'unknown')
+      AND (
+        status = 'unknown'
+        OR (status IN ('dispatched', 'executing') AND (${allowInflight}::boolean OR deadline_at < NOW()))
+      )
   `) as unknown as { id: string }[]
+
+  // 记录被"保护"起来的在途任务数：运维若发现名额没释放，需要从这里看出原因
+  const skipped = (await sql`
+    SELECT COUNT(*)::int AS n FROM tasks
+    WHERE post_id = ${postId}
+      AND (dispatched_at AT TIME ZONE 'Asia/Shanghai')::date = ${today}::date
+      ${opts.deviceId ? sql`AND device_id = ${opts.deviceId}` : sql``}
+      AND status IN ('dispatched', 'executing')
+      AND deadline_at >= NOW()
+  `) as unknown as { n: number }[]
 
   let converged = 0
   for (const t of targets) {
@@ -371,9 +395,11 @@ export async function releasePostSlot(
     await sql`UPDATE posts SET last_comment_at = NULL, updated_at = NOW() WHERE id = ${postId}`
   }
 
+  const running = skipped[0]?.n ?? 0
   log.info(
     `admin release-slot post=${postId} device=${opts.deviceId ?? '*'} ` +
-      `converged=${converged}/${targets.length}（dispatched/executing/unknown → aborted）` +
+      `converged=${converged}/${targets.length}（unknown → aborted）` +
+      `running-kept=${running}（在途且未超期：不动它，等它自己回执或超时）` +
       `resetPacing=${resetPacing}`,
   )
   return {
@@ -383,6 +409,8 @@ export async function releasePostSlot(
       deviceId: opts.deviceId ?? null,
       convergedTasks: converged,
       candidates: targets.length,
+      /** 仍在执行、且未过回执截止时间的任务数（被有意保留） */
+      runningKept: running,
       resetPacing,
     },
   }

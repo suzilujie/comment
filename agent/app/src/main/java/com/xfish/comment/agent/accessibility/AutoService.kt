@@ -82,7 +82,11 @@ class AutoService : AccessibilityService() {
          * 缓存过期（TTL 内无窗口事件）才回退读树，保证极端情况下依然能拿到结果。
          */
         fun currentPackage(): String? {
-            if (System.currentTimeMillis() - cachedAt < PAGE_CACHE_TTL_MS) return cachedPkg
+            // ⚠ 用**单调时钟**：本文件其它时刻（lastPageAt / lastDetailAt）都是 elapsedRealtime，
+            //    唯独这里原来是墙钟。用户或系统把时间往回调几秒时，`now - cachedAt` 会变负、
+            //    小于 TTL → **过期缓存被当成新鲜**，currentPackage() 返回旧包名 →
+            //    douyinForeground() 误判（进而影响短链后"是否进了抖音"的判定）。
+            if (SystemClock.elapsedRealtime() - cachedAt < PAGE_CACHE_TTL_MS) return cachedPkg
             return runCatching { instance?.rootInActiveWindow?.packageName?.toString() }.getOrNull()
         }
 
@@ -212,7 +216,7 @@ class AutoService : AccessibilityService() {
             // 窗口事件本身已带包名/类名，直接缓存：后续查询零 IPC 开销
             cachedPkg = e.packageName?.toString()
             cachedCls = e.className?.toString()
-            cachedAt = System.currentTimeMillis()
+            cachedAt = SystemClock.elapsedRealtime()
 
             val cls = cachedCls
             if (cls != null) {

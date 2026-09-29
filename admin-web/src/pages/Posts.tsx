@@ -140,22 +140,26 @@ export default function Posts({ autoMs, refreshKey, notify }: Props) {
   const release = async (postId: string, city: string) => {
     const ok = window.confirm(
       `释放「${postId}」${city ? `（${city}）` : ''} 今天的占位？\n\n` +
-        '会把该帖今天**尚无结论**的任务（dispatched / executing / unknown）按「人工核实未发出」收敛：\n' +
-        '  退还当日配额 · 释放帖子名额与素材占用 · 清空「最近评论时间」\n' +
+        '会把该帖今天 **unknown** 的任务（以及已超过回执截止时间的在途任务）\n' +
+        '按「人工核实未发出」收敛：退还当日配额 · 释放帖子名额与素材占用 · 清空「最近评论时间」\n' +
         '（即解除单帖 15 分钟节奏限制，设备可立刻重新派到这条帖子）\n\n' +
-        '✔ 已成功的任务与全部事件记录都会**保留**（可审计）\n' +
-        '⚠ 仅在人工核实「确实没发出去」后使用 —— 若评论其实已发出，这次收敛会解除防重复护栏。',
+        '✔ 已成功的任务、全部事件记录，以及**正在执行且未超期**的任务都会保留\n' +
+        '⚠ 仅在人工核实「确实没发出去」后使用 —— 若评论其实已发出，\n' +
+        '   这次收敛会退还配额并解除防重复护栏，导致同帖被重派。',
     )
     if (!ok) return
     try {
       const r = await api.releaseSlot(postId, { resetPacing: true })
-      const d = r.detail as { convergedTasks?: number; candidates?: number } | undefined
+      const d = r.detail as
+        | { convergedTasks?: number; candidates?: number; runningKept?: number }
+        | undefined
       notify(
         r.ok
           ? `已释放：收敛任务 ${d?.convergedTasks ?? 0} 条` +
               (d?.candidates !== undefined && d.candidates !== d.convergedTasks
                 ? `（候选 ${d.candidates} 条，其余已被并发改写、未生效）`
                 : '') +
+              (d?.runningKept ? ` · 另有 ${d.runningKept} 条仍在执行，已保留` : '') +
               ' · 已成功任务与事件已保留'
           : `释放失败：${r.error}`,
         r.ok ? 'ok' : 'err',

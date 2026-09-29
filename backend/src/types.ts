@@ -12,13 +12,15 @@ export type TaskStatus =
   | 'aborted'
   | 'unknown' // 可能已发出 → 人工确认，禁止自动重试
 
-/** 终态集合 */
-export const TERMINAL_STATUSES: readonly TaskStatus[] = [
-  'succeeded',
-  'failed',
-  'aborted',
-  'unknown',
-]
+/**
+ * 终态集合。
+ *
+ * ⚠ **不含 `unknown`** —— 它只是"暂时无法判断"：任务仍占着帖子名额与当日配额，
+ *   而且迟到的真回执（"其实我没发出去"）或人工订正都应能把它收敛成确定结论。
+ *   把它当终态会让收敛逻辑被静默丢弃（收据被"已终态"挡掉，名额永远释放不了）。
+ *   权威定义见 `task/task_store.ts` 的 `TERMINAL_STATUSES`。
+ */
+export const TERMINAL_STATUSES: readonly TaskStatus[] = ['succeeded', 'failed', 'aborted']
 
 /** 在途状态（占用账号与设备） */
 export const IN_FLIGHT_STATUSES: readonly TaskStatus[] = ['dispatched', 'executing']
