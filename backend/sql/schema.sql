@@ -12,6 +12,9 @@
 -- ── 设备（设备即投放主体：唯一号 + 机型档案 + 配额计数） ──────
 CREATE TABLE IF NOT EXISTS devices (
   id                TEXT PRIMARY KEY,              -- 设备唯一号（Agent 首启生成 UUID）
+  -- 设备名（人类可读，装机时在设备端「设置 → 设备名称」录入，管理台辨认用）
+  -- 设备端权威：随心跳上报即覆盖；旧 APK 不上报 → 后台保持原值
+  name              TEXT,
   -- 机型档案（多机型适配：规则包分槽依据）
   model             TEXT,
   resolution        TEXT,
@@ -129,7 +132,7 @@ CREATE TABLE IF NOT EXISTS tasks (
 CREATE INDEX IF NOT EXISTS idx_tasks_status_deadline ON tasks (status, deadline_at);
 CREATE INDEX IF NOT EXISTS idx_tasks_device_time ON tasks (device_id, dispatched_at DESC);
 CREATE INDEX IF NOT EXISTS idx_tasks_post_time ON tasks (post_id, dispatched_at DESC);
--- 200 台规模化索引：同设备 × 同帖的当日去重查询（countDevicePostComments）
+-- 200 台规模化索引：「同设备 × 同帖冷却」查询（默认当天一次，见 post_store.findDispatchablePost）
 CREATE INDEX IF NOT EXISTS idx_tasks_device_post ON tasks (device_id, post_id);
 -- 管理台任务列表按 dispatched_at DESC 分页（listTasks / countTasks）；没有这条索引时
 -- 每次翻页都要对全表排序（tasks 约 12 万行/月，很快会变成明显的慢查询）。
@@ -243,3 +246,9 @@ CREATE TABLE IF NOT EXISTS dispatch_tokens (
   created_at  TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 CREATE INDEX IF NOT EXISTS idx_dispatch_tokens_time ON dispatch_tokens (created_at DESC);
+
+-- ── 增量列迁移（2026-09-29）────────────────────────────────────
+-- ⚠ 为什么必须写在这里：`ensureSchema()` 是「整个文件 unsafe 执行」，
+--   而上面用的是 `CREATE TABLE IF NOT EXISTS` —— 对**已存在**的表，改 CREATE 语句
+--   不会补列（新库有、老库没有，且不报错）。所以增量列必须显式 ALTER。
+ALTER TABLE devices ADD COLUMN IF NOT EXISTS name TEXT;

@@ -21,6 +21,23 @@ function int(key: string, fallback: number): number {
   return Number.isFinite(n) ? n : fallback
 }
 
+/**
+ * 读整数（新键优先，旧键兜底）。
+ *
+ * 用于字段改名后的平滑过渡：`DAILY_QUOTA_PER_ACCOUNT` 是账号实体存在时的旧名，
+ * 现在叫 `DAILY_QUOTA_PER_DEVICE`。两者都读是为了**不打断已部署的 .env** ——
+ * 只认新键的话，老部署会静默回到默认值（"改配置不生效"是最难查的一类问题）。
+ */
+function intAlias(newKey: string, oldKey: string, fallback: number): number {
+  const v = process.env[newKey]
+  if (v !== undefined && v !== '') return int(newKey, fallback)
+  if (process.env[oldKey] !== undefined && process.env[oldKey] !== '') {
+    configWarnings.push(`${oldKey} 已改名，请改用 ${newKey}（当前仍兼容读取旧键）`)
+    return int(oldKey, fallback)
+  }
+  return fallback
+}
+
 /** 读浮点 */
 function float(key: string, fallback: number): number {
   const v = process.env[key]
@@ -84,9 +101,24 @@ function timeToMinute(key: string, v: string): number {
 }
 
 export interface DispatchConfig {
-  /** 单账号日评论上限 */
-  dailyQuotaPerAccount: number
-  /** 与上次「完成」的随机间隔区间（分钟） */
+  /**
+   * **单设备**日评论上限（需求：「单设备评论上限是 20 条」）。
+   *
+   * ⚠ 名字里的"账号"是 2026-09-26 账号实体移除之前的遗留叫法。一机一号，配额早已下沉到
+   *   设备维度（落库在 `devices.daily_done`），这里改名只是为了让代码与需求措辞一致 ——
+   *   这套系统已经因为"字段名与实际语义不符"（post_type vs comment_type）踩过一次大坑。
+   */
+  dailyQuotaPerDevice: number
+  /**
+   * 与上次**成功完成**之间的随机间隔区间（分钟）—— 即需求里的「可配置时间间隔」。
+   *
+   * 默认 30~60 分钟的依据：投放窗口 08:00–22:00 共 14 小时，要在窗口内做满 20 条，
+   * 平均间隔必须 ≤ 42 分钟，所以取 30~60 的随机区间（既够得上 20 条，又不像固定节拍）。
+   * 想要「1 小时/条」就把两个值都设成 60（代价：14 小时窗口内最多 14 条/设备）；
+   * 想「半小时/条」设 30/30。
+   *
+   * ⚠ 只对**成功**的评论计时（failed / aborted 不退间隔），见 `task_store.finishTask`。
+   */
   intervalMinMinutes: number
   intervalMaxMinutes: number
   /** 投放时段窗口（当天第几分钟） */
@@ -100,11 +132,26 @@ export interface DispatchConfig {
   /** 回执截止：派发后多少分钟无回执 → unknown */
   receiptTimeoutMinutes: number
   /**
-   * unknown 是否占用「同设备 × 同帖每天一次」名额。
+   * unknown 是否占用「同设备 × 同帖」冷却名额。
    *  true （默认，保守）：unknown 意味着"可能已发出"，占用可避免同帖出现两条评论；
    *  false（激进）：unknown 不占名额，适合假失败已被消除、且确定不会重复评论的场景。
    */
   unknownOccupiesPostSlot: boolean
+  /**
+   * 同一设备对同一帖的重复评论冷却（**自然日，UTC+8**）。
+   *
+   * 需求原文：「单设备对同一帖子：**一天**仅允许评论 1 次」。
+   *  · 1（默认）= 当天评过就不再派 —— 与 `daily_done`、管理台「今天」同一口径；
+   *  · N = 最近 N 个自然日内不允许重复；
+   *  · 0 = 不限制（不建议：会产生同帖重复评论）。
+   *
+   * ⚠ 这里曾经实现成「**永久**一次」（刻意不加日期范围，理由是切省周期 2 天、
+   *   设备转回来会重复评论同一条视频）。但那与需求不符，代价也很大：
+   *   每台设备对每个帖子一辈子只能评一次，帖子会静默变成"再也派不出去"，
+   *   而管理台只会显示"候选为空"。现在按需求口径回到"一天一次"，
+   *   同时用这个开关给"从严"留了口子（设成 IP 切省周期 2 天即可完全避免跨天重复）。
+   */
+  devicePostCooldownDays: number
 }
 
 export interface AdminConfig {
@@ -149,9 +196,10 @@ export const config = {
   poolMax: int('PG_POOL_MAX', 24),
   },
   dispatch: {
-    dailyQuotaPerAccount: int('DAILY_QUOTA_PER_ACCOUNT', 20),
+    dailyQuotaPerDevice: intAlias('DAILY_QUOTA_PER_DEVICE', 'DAILY_QUOTA_PER_ACCOUNT', 20),
     intervalMinMinutes: int('INTERVAL_MIN_MINUTES', 30),
     intervalMaxMinutes: int('INTERVAL_MAX_MINUTES', 60),
+    devicePostCooldownDays: int('DEVICE_POST_COOLDOWN_DAYS', 1),
     windowStartMinute: timeToMinute('DISPATCH_WINDOW_START', str('DISPATCH_WINDOW_START', '08:00')),
     windowEndMinute: timeToMinute('DISPATCH_WINDOW_END', str('DISPATCH_WINDOW_END', '22:00')),
     globalLimit: int('GLOBAL_DISPATCH_LIMIT', 3),

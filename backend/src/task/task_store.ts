@@ -13,10 +13,11 @@ import { db } from '../db_pg.js'
 import { emit, EVENTS } from '../bus.js'
 import { createLogger } from '../logger.js'
 import { config } from '../config.js'
-// ⚠ `localDayRange` 曾被漏掉：countTodayDone / countDevicePostComments 都在调它，
-// 但 import 里没有 → `tsc --noEmit` 报 TS2304，且一旦有人真的调用这两个函数，
-// 会在运行时抛 ReferenceError。两者目前都是死代码（全仓无调用方），所以一直没暴露。
-import { addMinutes, localDateKey, localDayRange, nowMs } from '../datetime.js'
+// 注：`countTodayDone` / `countDevicePostComments` 已删除（2026-09-29）。
+// 它们是"把约束下推到一条 SQL"（findDispatchablePost）之前的旧实现，全仓无调用方，
+// 却各自带着**与派单口径不一致**的写法（一个算"成功数"、一个写死"永久一次"）。
+// 留着它们的唯一效果是诱导后来者照着改 —— 而它们改不动任何线上行为。
+import { addMinutes, localDateKey, nowMs } from '../datetime.js'
 import { makeId, randomInt } from '../random.js'
 import type { Actor, TaskStatus } from '../types.js'
 
@@ -349,49 +350,6 @@ export async function findInFlightByDevice(deviceId: string): Promise<TaskRow | 
     ORDER BY dispatched_at DESC LIMIT 1
   `) as unknown as TaskRow[]
   return rows[0] ?? null
-}
-
-/** 该设备今日已完成的条数（按 UTC+8 自然日判定） */
-export async function countTodayDone(deviceId: string): Promise<number> {
-  const sql = db()
-  const { start, end } = localDayRange()
-  const rows = (await sql`
-    SELECT COUNT(*)::int AS n FROM tasks
-    WHERE device_id = ${deviceId}
-      AND status = 'succeeded'
-      AND finished_at >= ${start} AND finished_at < ${end}
-  `) as unknown as { n: number }[]
-  return rows[0]?.n ?? 0
-}
-
-/**
- * 该设备是否已评论过该帖（**永久一次**，不按天重置）。
- *
- * ⚠ 早期实现按「当日」计数，于是同一台设备隔天可以再评同一个帖子 ——
- * 切省周期是 2 天，设备转回来就会重复评论同一条视频。现已与
- * `findDispatchablePost` 第 4 条口径统一为「一辈子一次」。
- *
- * 口径：
- *  · succeeded / dispatched / executing —— 恒占用（已成功或在途，占用才能防重复派单）；
- *  · unknown —— 由 includeUnknown 决定（调用方传 config.dispatch.unknownOccupiesPostSlot，默认 true）：
- *    设备上报 unknown 表示"可能已发出"，占用可避免同帖出现两条评论；
- *    若确认不会重复评论，可置 false 以不占名额（配合人工订正流程）。
- */
-export async function countDevicePostComments(
-  deviceId: string,
-  postId: string,
-  includeUnknown: boolean,
-): Promise<number> {
-  const sql = db()
-  const rows = (await sql`
-    SELECT COUNT(*)::int AS n FROM tasks
-    WHERE device_id = ${deviceId} AND post_id = ${postId}
-      AND (
-        status IN ('succeeded', 'dispatched', 'executing')
-        OR (${includeUnknown} AND status = 'unknown')
-      )
-  `) as unknown as { n: number }[]
-  return rows[0]?.n ?? 0
 }
 
 /** 超期未回执的任务（后台判定 unknown，禁止自动重试） */

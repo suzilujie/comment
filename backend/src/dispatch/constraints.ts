@@ -9,6 +9,11 @@
  * 2026-09-26 结构变更：原「账号组」约束（日上限 / 完成间隔 / 连续失败降额 / 同帖日一次）
  * 随账号实体移除，等价地改由**设备维度**承载（一机一号，语义等价）。
  * 原因码常量名（ACCOUNT_*）保留以保持对外口径稳定，含义即"该设备的投放主体"。
+ *
+ * ⚠ 「帖组」（12-16）里的**同帖节奏**与**同设备 × 同帖冷却**现在**只**实现在
+ *   `post_store.findDispatchablePost` 与 `diagnoseNoCandidate`（下推到一条 SQL，200 台规模
+ *   必需）。这两个函数的旧版（checkDevicePostOnce 等）已删除 —— 多留一份实现就是多一处
+ *   会与派单门控漂移的口径，而漂移的后果是"帖子静默派不出去"这种极难归因的故障。
  */
 import { db } from '../db_pg.js'
 import { config } from '../config.js'
@@ -18,7 +23,10 @@ import type { ConstraintCheck } from '../types.js'
 import { NO_DISPATCH_REASONS } from '../types.js'
 import type { DeviceRow } from '../device/device_store.js'
 import { evaluateAvailability } from '../device/device_store.js'
-import { countDevicePostComments } from '../task/task_store.js'
+// 注：`checkDevicePostOnce`（第 4 条：同设备 × 同帖）已删除（2026-09-29）。
+// 它是"约束下推到一条 SQL"之前的旧实现，全仓无调用方，且口径与 findDispatchablePost
+// 不一致（写成"永久一次"）。现在这条规则的**唯一**实现在 post_store.findDispatchablePost
+// 与 diagnoseNoCandidate 里 —— 两处必须同步，多一份实现就是多一处会漂移的口径。
 
 const log = createLogger('constraint')
 
@@ -49,7 +57,7 @@ export async function checkQuota(
   }
   // 第 2 条：日上限
   const done = await ensureDailyCounter(device)
-  if (done >= config.dispatch.dailyQuotaPerAccount) {
+  if (done >= config.dispatch.dailyQuotaPerDevice) {
     return { pass: false, reason: NO_DISPATCH_REASONS.ACCOUNT_DAILY_QUOTA, retryAfterSeconds: 1800 }
   }
   // 第 3 条：与上次「完成」的间隔（服务端权威）
@@ -81,18 +89,6 @@ export async function ensureDailyCounter(device: DeviceRow): Promise<number> {
     WHERE id = ${device.id}
   `
   return 0
-}
-
-/** 第 4 条：同设备 × 同帖（今日未评论过） */
-export async function checkDevicePostOnce(
-  deviceId: string,
-  postId: string,
-): Promise<ConstraintCheck> {
-  // unknown 是否占用名额由配置决定（默认占用 —— 避免"评论其实已发出"造成同帖重复评论）
-  const n = await countDevicePostComments(deviceId, postId, config.dispatch.unknownOccupiesPostSlot)
-  return n === 0
-    ? { pass: true }
-    : { pass: false, reason: 'device_post_already_commented' }
 }
 
 // ── 时段组（17-18）───────────────────────────────────────────

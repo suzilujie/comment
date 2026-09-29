@@ -84,6 +84,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var permBanner: TextView
 
     // ── 设置页控件 ──
+    private lateinit var deviceNameInput: EditText
     private lateinit var serverInput: EditText
     private lateinit var clashInput: EditText
     private lateinit var clashSecretInput: EditText
@@ -101,6 +102,7 @@ class MainActivity : AppCompatActivity() {
         requestNotificationPermissionIfNeeded()
 
         lifecycleScope.launch {
+            deviceNameInput.setText(Prefs.deviceName(this@MainActivity))
             serverInput.setText(Prefs.server(this@MainActivity, BuildConfig.DEFAULT_SERVER))
             Api.baseUrl = Prefs.server(this@MainActivity, BuildConfig.DEFAULT_SERVER)
             // Clash 控制器（切城用）：回填并注入客户端
@@ -358,6 +360,7 @@ class MainActivity : AppCompatActivity() {
     // ── ③ 设置页 ─────────────────────────────────────────────
 
     private fun buildSettingsPage(): View = pageScroll {
+        deviceNameInput = inputField("如 A架-01-K30（可空）")
         serverInput = inputField("http://192.168.1.10:15650")
         clashInput = inputField("http://127.0.0.1:9090")
         clashSecretInput = inputField("控制器密钥（可空）")
@@ -367,6 +370,19 @@ class MainActivity : AppCompatActivity() {
             addView(sectionTitle("后台地址"))
             addView(serverInput)
             addView(primaryButton("保存并启动服务") { saveServer() })
+        })
+
+        addView(card {
+            addView(sectionTitle("设备名称"))
+            addView(deviceNameInput)
+            addView(primaryButton("保存设备名") { saveDeviceName() })
+            addView(
+                hint(
+                    "后台只有设备号（一串 UUID），无法辨认是哪台机器；这里录入名字后" +
+                        "管理台即可按名字查找。建议形如「A架-01-K30」，" +
+                        "最长 ${Prefs.DEVICE_NAME_MAX_LEN} 字，保存后立即上报。",
+                ),
+            )
         })
 
         addView(card {
@@ -426,6 +442,31 @@ class MainActivity : AppCompatActivity() {
     }
 
     // ── 动作 ─────────────────────────────────────────────────
+
+    /**
+     * 保存设备名并立即上报。
+     *
+     * ⚠ 空值语义：一期**不支持清空** —— 后台契约 `name` 最小长度 1（空串会被 Zod 拒绝），
+     * 且后台用 `COALESCE(EXCLUDED.name, devices.name)` 保旧值，抹不掉。故这里直接拦下空输入。
+     */
+    private fun saveDeviceName() {
+        lifecycleScope.launch {
+            val clean = deviceNameInput.text.toString().trim()
+            if (clean.isBlank()) {
+                toast("设备名不能为空（一期不支持清空，只能改名）")
+                // 回填已保存的名字，避免界面停留在"看起来已清空"的状态
+                deviceNameInput.setText(Prefs.deviceName(this@MainActivity))
+                return@launch
+            }
+            Prefs.setDeviceName(this@MainActivity, clean)
+            val saved = Prefs.deviceName(this@MainActivity)
+            deviceNameInput.setText(saved)
+            Log.i("ui", "设备名已保存：$saved")
+            toast("设备名已保存：$saved")
+            // 立即上报一次：否则管理台最多 30 秒后才看得到新名字（装机时会误以为没保存成功）
+            AgentService.heartbeatNow(this@MainActivity)
+        }
+    }
 
     private fun saveServer() {
         lifecycleScope.launch {
@@ -573,6 +614,7 @@ class MainActivity : AppCompatActivity() {
 
         val a11y = A11yStatus.enabled(ctx) && AutoService.connected
         val paused = Prefs.isPaused(ctx)
+        val deviceName = Prefs.deviceName(ctx)
         val lastIp = Prefs.lastIp(ctx)
         val lastCity = Prefs.lastIpCity(ctx)
         val personaVersion = Prefs.personaVersion(ctx)
@@ -607,6 +649,9 @@ class MainActivity : AppCompatActivity() {
         statusCard.removeAllViews()
 
         statusCard.addView(groupLabel("设备"))
+        statusCard.addView(
+            kvRow("设备名", deviceName.ifBlank { "未命名（设置页填写）" }),
+        )
         statusCard.addView(kvRow("设备号", "${deviceId.take(8)}…${deviceId.takeLast(4)}"))
         statusCard.addView(
             kvRow(

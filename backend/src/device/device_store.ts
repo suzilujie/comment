@@ -15,6 +15,8 @@ const log = createLogger('device')
 /** devices 表行（只列出代码用到的列） */
 export interface DeviceRow {
   id: string
+  /** 设备名（人类可读；设备端录入、随心跳上报。未录入时为 null） */
+  name: string | null
   admin_state: AdminState
   last_seen_at: Date | null
   last_ip: string | null
@@ -63,13 +65,13 @@ export async function applyHeartbeat(req: HeartbeatRequest): Promise<DeviceRow> 
   // ⚠ UPSERT 直接 RETURNING * ：原实现写完之后又 `getDevice` 查了一次，
   // 而心跳路径上 guard / applyHeartbeat / eligibleForTask 各读一次 —— 同一行读 3 次。
   const upserted = (await sql`
-    INSERT INTO devices (id, model, resolution, dpi, os_version, rom_version,
+    INSERT INTO devices (id, name, model, resolution, dpi, os_version, rom_version,
                          font_scale, dark_mode, agent_version, admin_state,
                          last_seen_at, last_ip, last_ip_city, ipv6_leak,
                          accessibility_ok, foreground_ok, proxy_ok, battery,
                          storage_free_mb, clock_offset_sec, rule_pack_version,
                          douyin_version, busy_task_id, state, presence, created_at, updated_at)
-    VALUES (${req.deviceId}, ${req.profile?.model ?? null}, ${req.profile?.resolution ?? null},
+    VALUES (${req.deviceId}, ${req.name ?? null}, ${req.profile?.model ?? null}, ${req.profile?.resolution ?? null},
             ${req.profile?.dpi ?? null}, ${req.profile?.osVersion ?? null}, ${req.profile?.romVersion ?? null},
             ${req.profile?.fontScale ?? null}, ${req.profile?.darkMode ?? null}, ${s.agentVersion},
             'enabled', NOW(), ${s.ip}, ${s.ipCity}, ${s.ipv6Leak ?? null},
@@ -92,6 +94,9 @@ export async function applyHeartbeat(req: HeartbeatRequest): Promise<DeviceRow> 
       rule_pack_version = EXCLUDED.rule_pack_version,
       douyin_version = EXCLUDED.douyin_version,
       busy_task_id = EXCLUDED.busy_task_id,
+      -- 设备名（设备端权威）：上报即覆盖；但**不能**直接赋值 EXCLUDED.name ——
+      -- 未升级的旧 APK 不带该字段（EXCLUDED.name 为 NULL），直接赋值会把已录入的名字抹掉。
+      name = COALESCE(EXCLUDED.name, devices.name),
       model = COALESCE(EXCLUDED.model, devices.model),
       resolution = COALESCE(EXCLUDED.resolution, devices.resolution),
       dpi = COALESCE(EXCLUDED.dpi, devices.dpi),
@@ -166,7 +171,7 @@ export interface DeviceFilter {
   health?: 'ok' | 'problem'
   /** 属地（省级，精确匹配） */
   city?: string
-  /** 关键词：设备 ID / 机型 */
+  /** 关键词：设备名 / 设备 ID / 机型 */
   q?: string
 }
 
@@ -194,7 +199,8 @@ function deviceWhere(f: DeviceFilter) {
   if (f.city) parts.push(sql`last_ip_city = ${f.city}`)
   if (f.q) {
     const like = `%${f.q}%`
-    parts.push(sql`(id ILIKE ${like} OR model ILIKE ${like})`)
+    // 设备名优先命中（管理台按名字找人是最常见路径）；名字为空时 ILIKE 不匹配，不影响 ID/机型搜索
+    parts.push(sql`(name ILIKE ${like} OR id ILIKE ${like} OR model ILIKE ${like})`)
   }
   return parts.reduce((acc, p) => sql`${acc} AND ${p}`)
 }
@@ -208,7 +214,7 @@ export async function listDevices(
   const sql = db()
   const where = deviceWhere(filter)
   return (await sql`
-    SELECT id, admin_state, last_seen_at, last_ip, last_ip_city,
+    SELECT id, name, admin_state, last_seen_at, last_ip, last_ip_city,
            accessibility_ok, foreground_ok, proxy_ok, busy_task_id,
            agent_version, rule_pack_version, douyin_version, clock_offset_sec,
            model, resolution,

@@ -120,7 +120,7 @@ export async function dispatchTo(
   // ── 12-16 + 第 4 条：**一次查询**求出可派发候选 ──
   // ⚠ 原实现是「取 20 个候选帖，再逐个执行 6~9 条检查」—— 单次 claim 最坏约 198 条
   //    串行 SQL。200 台并发领取时会把连接池排空、按串行化放大长尾，心跳跟着排队。
-  //    现在全部约束（帖余量 / 单帖节奏 / 同设备同帖永久一次 / 素材可用 / 图文配比）
+  //    现在全部约束（帖余量 / 单帖节奏 / 同设备同帖冷却 / 素材可用 / 图文配比）
   //    下推到一条 SQL，见 post_store.findDispatchablePost。
   const candidate = await findDispatchablePost(
     device.id,
@@ -177,7 +177,7 @@ export async function dispatchTo(
   // 同理：`checkQuota` 的读与这里的写之间隔着十几次 await，并发下会超发。
   const claimedQuota = (await sql`
     UPDATE devices SET daily_done = daily_done + 1, updated_at = NOW()
-    WHERE id = ${device.id} AND daily_done < ${config.dispatch.dailyQuotaPerAccount}
+    WHERE id = ${device.id} AND daily_done < ${config.dispatch.dailyQuotaPerDevice}
     RETURNING daily_done
   `) as unknown as { daily_done: number }[]
   if (claimedQuota.length === 0) {
@@ -279,7 +279,7 @@ export async function dispatchTo(
   }
   log.info(
     `dispatched task=${taskId} device=${device.id} post=${candidate.id} city=${city} ` +
-      `type=${commentType} today=${claimedQuota[0]?.daily_done ?? '-'}/${config.dispatch.dailyQuotaPerAccount}`,
+      `type=${commentType} today=${claimedQuota[0]?.daily_done ?? '-'}/${config.dispatch.dailyQuotaPerDevice}`,
   )
   return { task: pkg }
 }
@@ -335,7 +335,7 @@ export function eligibleForTask(device: DeviceRow | null): boolean {
     ? null
     : typeof raw === 'string' ? raw.slice(0, 10) : new Date(raw as unknown as string).toISOString().slice(0, 10)
   const done = doneDate === today ? device.daily_done : 0
-  return done < config.dispatch.dailyQuotaPerAccount
+  return done < config.dispatch.dailyQuotaPerDevice
 }
 
 /** 计算该设备的下次可派单时间（供看板与诊断） */

@@ -137,6 +137,24 @@ class AgentService : Service() {
                 context.startService(intent)
             }
         }
+
+        /** 立即上报一次心跳（用于「设备名已修改」等需要立刻同步的场景） */
+        const val ACTION_HEARTBEAT_NOW = "com.xfish.comment.agent.action.HEARTBEAT_NOW"
+
+        /**
+         * 请求「立即心跳」：不等下一个 30 秒节拍。
+         *
+         * 场景：设备端刚改了设备名 —— 若等下次心跳，管理台最多 30 秒后才看得到新名字，
+         * 而装机时人是"填完就想看到后台显示"的（否则会以为没保存成功、重复填写）。
+         */
+        fun heartbeatNow(context: Context) {
+            val intent = Intent(context, AgentService::class.java).setAction(ACTION_HEARTBEAT_NOW)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                context.startForegroundService(intent)
+            } else {
+                context.startService(intent)
+            }
+        }
     }
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
@@ -226,6 +244,14 @@ class AgentService : Service() {
             rotateWaker.trySend(Unit)
             Log.i(TAG, "收到「立即切城」请求（调试），本轮跳过周期检查")
             Bus.emit(Bus.Events.UI_REFRESH)
+        }
+
+        // 立即上报一次心跳（设置页改完设备名后调用）：复用心跳锁，避免与心跳循环并发
+        if (intent?.action == ACTION_HEARTBEAT_NOW) {
+            scope.launch {
+                runCatching { heartbeatLock.withLock { doHeartbeat() } }
+                    .onFailure { Log.w(TAG, "立即心跳失败：${it.message}") }
+            }
         }
 
         // 原子门闩：开机时 App.onCreate 与 BootReceiver 可能连续拉起服务，
@@ -411,6 +437,8 @@ class AgentService : Service() {
                 clockOffsetSec = Time.clockOffsetSec(),
             ),
             profile = SelfCheck.profile(this),
+            // 设备名（人类可读，管理台辨认用）：未录入时传 null，后台不会被覆盖成空
+            name = Prefs.deviceName(this).takeIf { it.isNotBlank() },
             // 契约字段：设备当前在忙哪条任务（由 runTask 维护；早期恒 null，该字段形同虚设）
             busyTaskId = AgentService.busyTaskId,
             walPending = walPending,

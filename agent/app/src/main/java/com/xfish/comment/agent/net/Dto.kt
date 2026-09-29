@@ -65,6 +65,12 @@ data class HeartbeatReq(
     val deviceId: String,
     val seq: Long,
     val state: DeviceStateDto,
+    /**
+     * 设备名（人类可读，装机时在「设置 → 设备名称」录入，供管理台辨认）。
+     *
+     * 可空：未录入时不上报（后台保持原值，不会被抹成空）。
+     */
+    val name: String? = null,
     val profile: DeviceProfileDto? = null,
     val busyTaskId: String? = null,
     val walPending: List<WalPendingDto>? = null,

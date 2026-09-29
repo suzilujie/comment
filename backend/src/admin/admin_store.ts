@@ -93,9 +93,11 @@ export interface AdminPostRow {
   /** 已占用条数（succeeded + dispatched + executing + unknown） */
   committed: number
   /**
-   * 今天已派发条数。
-   * 注意「同设备 × 同帖」的限制是**永久一次**（不再按天重置），
-   * 这个字段现在只用于判断「释放今日名额」按钮是否可用。
+   * 今天已派发条数（= 今天该帖被派下去的条数，含在途）。
+   *
+   * 「同设备 × 同帖」的限制按需求是**冷却**（默认当天一次，见 config 的
+   * devicePostCooldownDays），所以这个数字与"该帖今天还能不能派"直接相关；
+   * 「释放名额」也以它为判断依据（释放的是**今天**的占位）。
    */
   today_used: number
   last_comment_at: Date | null

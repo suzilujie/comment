@@ -161,8 +161,8 @@ export interface DispatchCandidate {
  *
  * 现在把全部约束下推到一条 SQL（全部是 EXISTS / 标量子查询，PostgreSQL 可以走索引）：
  *  · 12/13 帖有余量（用 `committed` 计数，与原子占位同一口径）
- *  · 14   单帖节奏
- *  · 4    同设备 × 同帖**永久**未评论过（不设日期范围，隔天也不允许重复）
+ *  · 14   单帖节奏：与上次成功评论拉开间隔，且该帖当前**没有在途任务**
+ *  · 4    同设备 × 同帖**冷却**（默认「当天一次」，见 config.dispatch.devicePostCooldownDays）
  *  · 15   还有未使用的话术；若本次需要配图，还必须有未使用的图片
  *  · 形态 1/4 图文配比（口径同 `decideCommentType`，含 unknown 计占用）
  *
@@ -185,22 +185,39 @@ export async function findDispatchablePost(
         AND p.city = ${city}
         -- 12/13：仍有缺口
         AND p.committed < p.target_count
-        -- 14：单帖节奏
+        -- 14：单帖节奏。两层含义，缺一不可：
+        --   ① 与**上一次成功评论**拉开间隔；
+        --   ② 该帖**当前不能有在途任务**。
+        --   只看 ① 是不够的：两台设备可以在同一分钟内先后领到同一帖（此刻谁都还没成功、
+        --   last_comment_at 还是旧值），于是两条评论几乎同时发出 —— 正是需求
+        --   「单帖的 10–15 条不可在 1 分钟内集中发完，需拉开发布间隔」要避免的。
         AND (
           p.last_comment_at IS NULL
           OR p.last_comment_at < NOW() - ${`${config.dispatch.perPostMinIntervalMinutes} minutes`}::interval
         )
-        -- 4：同设备 × 同帖 **永久一次**。
-        --    ⚠ 这里刻意**不加日期范围**：早期实现只限"当日"，导致同一台设备隔天可以
-        --    再评同一个帖子 —— 切省周期是 2 天，设备转回来就会重复评论同一条视频。
-        --    去掉日期条件后正好命中 idx_tasks_device_post (device_id, post_id)，
-        --    比原来的日期区间更快（区间写法用不上这个复合索引）。
+        AND NOT EXISTS (
+          SELECT 1 FROM tasks t4
+          WHERE t4.post_id = p.id AND t4.status IN ('dispatched', 'executing')
+        )
+        -- 4：同设备 × 同帖的**冷却**（需求：「单设备对同一帖子：一天仅允许评论 1 次」）。
+        --    默认冷却 1 个自然日 → 当天评过就不再派；DEVICE_POST_COOLDOWN_DAYS=N 表示
+        --    最近 N 个自然日内不派；0 = 不限制。
+        --    ⚠ 时间口径与 daily_done、管理台「今天」一致，用 **UTC+8 自然日**，
+        --      而不是"滚动 24 小时"（那会让 23:59 评过的帖一直卡到次日 23:59）。
+        --    ⚠ 早期这里刻意**不加日期范围**（"永久一次"）：理由是切省周期 2 天、设备转回来
+        --      会重复评论。但那与需求不符，且帖子很快会变成"每台设备一辈子只能评一次"，
+        --      随后静默派不出去。要从严就把 DEVICE_POST_COOLDOWN_DAYS 设成 2（= 切省周期）。
         AND NOT EXISTS (
           SELECT 1 FROM tasks t2
           WHERE t2.device_id = ${deviceId} AND t2.post_id = p.id
             AND (
               t2.status IN ('succeeded', 'dispatched', 'executing')
               OR (${unknownOccupiesPostSlot} AND t2.status = 'unknown')
+            )
+            AND (
+              ${config.dispatch.devicePostCooldownDays}::int <= 0
+              OR (t2.dispatched_at AT TIME ZONE 'Asia/Shanghai')::date
+                 > (NOW() AT TIME ZONE 'Asia/Shanghai')::date - ${config.dispatch.devicePostCooldownDays}::int
             )
         )
         -- 15：必须还有未使用的话术
@@ -303,19 +320,31 @@ export async function diagnoseNoCandidate(
     WHERE p.status = 'active'
       AND p.city = ${city}
       AND p.committed < p.target_count
-      -- ⚠ 单帖节奏：候选查询里有这一条，**这里也必须一致**。
-      --    少了它，"刚被评论过、正在 15 分钟冷却期"的帖会被算进"可派却选不出素材"，
-      --    于是日志报「全城缺素材，请去补话术/图片」—— 而它们只是**还没到时候**，
-      --    运维照此去补一堆根本用不上的素材（归因错得毫无痕迹）。
+      -- ⚠ 以下三条必须与 [findDispatchablePost] 的候选条件**逐条一致**：
+      --    少任何一条，"可派却选不出素材"的归因就会把"只是还没到时候"的帖算进来，
+      --    日志报「全城缺素材，请去补话术/图片」，运维照此去补一堆用不上的素材
+      --    （归因错得毫无痕迹，是最难发现的一类）。
+      --    ① 单帖节奏（与上次成功评论的间隔）
       AND (
         p.last_comment_at IS NULL
         OR p.last_comment_at < NOW() - ${`${config.dispatch.perPostMinIntervalMinutes} minutes`}::interval
       )
+      --    ② 该帖当前没有在途任务
+      AND NOT EXISTS (
+        SELECT 1 FROM tasks t4
+        WHERE t4.post_id = p.id AND t4.status IN ('dispatched', 'executing')
+      )
+      --    ③ 同设备 × 同帖冷却（默认：当天一次）
       AND NOT EXISTS (
         SELECT 1 FROM tasks t2
         WHERE t2.device_id = ${deviceId} AND t2.post_id = p.id
           AND (t2.status IN ('succeeded', 'dispatched', 'executing')
                OR (${unknownOccupiesPostSlot} AND t2.status = 'unknown'))
+          AND (
+            ${config.dispatch.devicePostCooldownDays}::int <= 0
+            OR (t2.dispatched_at AT TIME ZONE 'Asia/Shanghai')::date
+               > (NOW() AT TIME ZONE 'Asia/Shanghai')::date - ${config.dispatch.devicePostCooldownDays}::int
+          )
       )
   `) as unknown as { posts_in_city: number; blocked_by_material: number }[]
 

@@ -219,7 +219,7 @@ if (!(await ping())) {
 startScheduler()
 
 log.info(`backend listening on http://${config.server.host}:${config.server.port}`)
-log.info(`heartbeat=${config.heartbeat.seconds}s quota/day=${config.dispatch.dailyQuotaPerAccount} ` +
+log.info(`heartbeat=${config.heartbeat.seconds}s quota/day=${config.dispatch.dailyQuotaPerDevice} ` +
   `interval=${config.dispatch.intervalMinMinutes}-${config.dispatch.intervalMaxMinutes}min ` +
   `window=${config.dispatch.windowStartMinute}-${config.dispatch.windowEndMinute}(local minute of day)`)
 // 把关键容量参数打出来：200 台规模下「连接池被 .env 里的旧值覆盖」是很容易漏的坑

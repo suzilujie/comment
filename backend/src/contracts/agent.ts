@@ -48,6 +48,13 @@ export const WalPendingSchema = z.object({
 /** ① 心跳请求 */
 export const HeartbeatRequestSchema = z.object({
   deviceId: z.string().min(8),
+  /**
+   * 设备名（人类可读，装机时在设备端录入，供管理台辨认）。
+   *
+   * **可选**：未升级的旧 APK 不上报该字段，后台必须保持原值（见 applyHeartbeat 的 COALESCE），
+   * 否则每次心跳都会把已录入的名字抹成 NULL。
+   */
+  name: z.string().min(1).max(24).optional(),
   /** 单调递增序号，用于检测重复 / 乱序 */
   seq: z.number().int().nonnegative(),
   state: DeviceStateSchema,
