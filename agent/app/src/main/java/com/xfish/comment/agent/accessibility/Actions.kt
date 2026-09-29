@@ -213,6 +213,34 @@ object Actions {
         return focused.firstOrNull() ?: visible.firstOrNull() ?: rest.firstOrNull()
     }
 
+    /**
+     * 页面上**任一**可编辑节点是否包含指定文本。
+     *
+     * ⚠ 不能用「树序第一个 EditText」来判定：图文评论**贴图之后**页面上会同时存在两个
+     *   同 id 的 EditText（折叠态底栏在前、展开态编辑框在后，见 [findFocusedEditable] 的注释），
+     *   而第一个是**空的折叠态底栏** —— 拿它判定「输入框是否仍持有本次话术」会恒为 false，
+     *   于是"发送到底生效没有"两处判定一起失真（实测踩过：`editableField` 恒命中空节点）。
+     *
+     * @return true = 至少有一个输入框仍含有该文本（= 话术还留在输入框里，提交没生效）
+     */
+    fun anyEditableContains(text: String): Boolean {
+        if (text.isEmpty()) return false
+        val root = AutoService.root() ?: return false
+        var hit = false
+        fun dfs(node: AccessibilityNodeInfo, depth: Int) {
+            if (hit || depth > 25) return
+            if (node.isEditable && node.text?.toString().orEmpty().contains(text)) {
+                hit = true
+                return
+            }
+            for (i in 0 until node.childCount) {
+                dfs(node.getChild(i) ?: continue, depth + 1)
+            }
+        }
+        dfs(root, 0)
+        return hit
+    }
+
     // ── 应用与链接 ───────────────────────────────────────────
 
     /**

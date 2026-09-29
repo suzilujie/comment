@@ -16,6 +16,28 @@ import { guard } from './guard.js'
 const log = createLogger('event')
 const route = new Hono()
 
+/**
+ * 事件里的任务是否属于上报设备。
+ *
+ * ⚠ 与回执接口同一个道理：早期只校验"设备已登记"，任一设备都能改**别人**任务的状态
+ *   （开工 / 中止），会污染对方的计数与帖子名额。归属不符时拒绝并留痕 ——
+ *   这类污染事后几乎无法归因（看不出是"谁"把任务改成 aborted 的）。
+ */
+async function ownedByDevice(taskId: string, deviceId: string): Promise<boolean> {
+  const task = await getTask(taskId)
+  if (!task) {
+    log.warn(`event task not found task=${taskId} device=${deviceId}`)
+    return false
+  }
+  if (task.device_id && task.device_id !== deviceId) {
+    log.warn(
+      `event device mismatch task=${taskId} owner=${task.device_id} sender=${deviceId} → reject`,
+    )
+    return false
+  }
+  return true
+}
+
 route.post('/', async (c) => {
   const g = await guard(c, EventRequestSchema)
   if (!g) return c.res
@@ -27,23 +49,38 @@ route.post('/', async (c) => {
     // ── 开工信号：任务 → executing（提升 unknown 判定精度）──
     case 'task_started': {
       if (!data.taskId) break
+      if (!(await ownedByDevice(data.taskId, device.id))) break
       const ok = await markStarted(data.taskId)
       log.info(`task_started device=${device.id} task=${data.taskId} accepted=${ok}`)
       break
     }
 
-    // ── 本地校验不通过或安全类中止：立即落终态 aborted（不得静默丢弃）──
+    // ── 本地中止：立即落终态（不得静默丢弃）。归因要分两类 ──
+    //
+    //  · 设备**确认未发出**的本地中止（元素未命中、属地不符、超时未提交…）→ aborted：
+    //    退还当日配额、释放帖子名额与素材；
+    //  · **崩溃恢复**（reasonCode 以 crash_recovery 开头）→ **unknown**：
+    //    进程是在评论**可能已经发出**之后被杀掉的，绝不能当"确认未发出" ——
+    //    那样名额一释放、配额一退还，同一设备会被重新派到同一帖，同帖出现两条评论。
+    //    （新版设备端已改走回执通道报 unknown；这条分支是给尚未升级的旧包兜底。）
     case 'task_aborted': {
       if (!data.taskId) break
+      if (!(await ownedByDevice(data.taskId, device.id))) break
+      const crashRecovery = (data.reasonCode ?? '').startsWith('crash_recovery')
       const task = await getTask(data.taskId)
-      if (task && task.status !== 'succeeded' && task.status !== 'failed') {
-        await finishTask(data.taskId, 'aborted', {
-          reasonCode: data.reasonCode ?? 'aborted_by_device',
+      if (task && !['succeeded', 'failed', 'aborted', 'unknown'].includes(task.status)) {
+        await finishTask(data.taskId, crashRecovery ? 'unknown' : 'aborted', {
+          reasonCode: crashRecovery
+            ? 'crash_recovery_unknown'
+            : (data.reasonCode ?? 'aborted_by_device'),
           actor: 'device',
           detail: data.detail,
         })
       }
-      log.warn(`task_aborted device=${device.id} task=${data.taskId} reason=${data.reasonCode ?? '-'}`)
+      log.warn(
+        `task_aborted device=${device.id} task=${data.taskId} reason=${data.reasonCode ?? '-'} ` +
+          `→ ${crashRecovery ? 'unknown（可能已发出，禁止自动重试）' : 'aborted'}`,
+      )
       break
     }
 

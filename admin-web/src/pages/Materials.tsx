@@ -98,8 +98,12 @@ export default function Materials({ autoMs, refreshKey, notify }: Props) {
     >
       {mats.loading && !mats.data && <Spinner />}
       {mats.error && <ErrorBox msg={mats.error} onRetry={mats.reload} />}
+      {/* ⚠ 原文案写的是「只有 post_type=image 的帖子才会用到」，那是改造前的行为：
+          当时只有图文帖才配图。现在配图按「每条帖子图文评论占 1/4」的配比走，
+          **与帖子类型无关** —— 视频帖同样需要素材。留着那句会让运维不去给视频帖补图，
+          结果帖子静默派不出去（管理台只会显示"缺图片"）。 */}
       {mats.data && mats.data.items.length === 0 && (
-        <Empty text="还没有素材。上传一张图片试试（只有 post_type=image 的帖子才会用到）" />
+        <Empty text="还没有素材。上传一张图片试试 —— 所有帖子都会用到：每条帖子按「图文评论占 1/4」的配比配图，与帖子是视频帖还是图文帖无关。" />
       )}
       {mats.data && mats.data.items.length > 0 && (
         <Table head={['预览', 'hash / 路径', '大小', '被引用', '状态', '上传时间', '操作']}>

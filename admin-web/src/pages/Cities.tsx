@@ -75,6 +75,8 @@ export default function Cities({ autoMs, refreshKey, notify }: Props) {
     }
   }
 
+  // ⚠ 这两个统计是**本页**的（列表接口不返回全量启用/空跑数）：分页下不能说成"启用 N 个省份"，
+  //    那会被读成全量口径。这里显式标注"本页"，并给出 total 让运维知道池子有多大。
   const items = cities.data?.items ?? []
   const activeCount = items.filter((c) => c.active).length
   const emptyCount = items.filter((c) => c.active && c.post_count === 0).length
@@ -83,8 +85,8 @@ export default function Cities({ autoMs, refreshKey, notify }: Props) {
     <Card
       title="省份池"
       subtitle={
-        `启用 ${activeCount} 个省份` +
-        (emptyCount > 0 ? ` · ⚠ ${emptyCount} 个启用省份没有可评帖子（设备切过去会空跑）` : '')
+        `共 ${cities.data?.total ?? 0} 个省份 · 本页启用 ${activeCount} 个` +
+        (emptyCount > 0 ? ` · ⚠ 本页 ${emptyCount} 个启用省份没有可评帖子（设备切过去会空跑）` : '')
       }
       actions={
         <Btn onClick={cities.reload} disabled={cities.loading}>

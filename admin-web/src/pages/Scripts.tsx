@@ -83,12 +83,19 @@ export default function Scripts({ autoMs, refreshKey, notify }: Props) {
     }
   }
 
-  const enabledCount = scripts.data?.items.filter((s) => s.enabled).length ?? 0
+  // ⚠ 「共 N 条」必须用 total（全量）：用 items.length（当前页）会让这个数字随翻页变化，
+  //    看起来像数据在丢。"启用"只能对本页统计（列表接口不返回全量启用数），所以写明"本页"，
+  //    避免读者把两个不同口径的数字并排比较。
+  const pageEnabled = scripts.data?.items.filter((s) => s.enabled).length ?? 0
 
   return (
     <Card
       title="话术管理"
-      subtitle={`共 ${scripts.data?.items.length ?? 0} 条，启用 ${enabledCount} 条 · 派单时按「同帖不重复」挑选`}
+      subtitle={
+        `共 ${scripts.data?.total ?? 0} 条` +
+        (scripts.data ? `（本页启用 ${pageEnabled} 条）` : '') +
+        ' · 派单时按「同帖不重复」挑选'
+      }
       actions={
         <Btn onClick={scripts.reload} disabled={scripts.loading}>
           刷新

@@ -1,5 +1,18 @@
 import { api, fmtTime } from '../api'
-import { Badge, Btn, Card, Empty, ErrorBox, Pager, Spinner, Table, Td, useFetch, usePaging } from '../ui'
+import {
+  Badge,
+  Btn,
+  Card,
+  Empty,
+  ErrorBox,
+  Pager,
+  shortId,
+  Spinner,
+  Table,
+  Td,
+  useFetch,
+  usePaging,
+} from '../ui'
 
 interface Props {
   autoMs: number
@@ -7,6 +20,14 @@ interface Props {
   notify: (text: string, tone?: 'ok' | 'err' | 'info') => void
 }
 
+/**
+ * 指令状态的配色。
+ *
+ * ⚠ 与 `api.ts` 里同名的 `statusTone` **不是一回事**：那个面向任务/帖子状态
+ * （succeeded/failed/unknown…），这个面向指令状态（pending/delivered/done…）。
+ * 两者取值集合不重叠，所以目前各自独立不会出错 —— 但名字重了容易误引入，
+ * 本文件刻意只从 api 引入 `api`/`fmtTime`，不引入那个同名函数。
+ */
 const statusTone = (s: string): 'ok' | 'warn' | 'err' | 'info' | 'muted' => {
   switch (s) {
     case 'done':
@@ -37,16 +58,18 @@ export default function Commands({ autoMs, refreshKey, notify }: Props) {
     autoMs,
   )
 
+  // ⚠ 与其它列表一致：总数用 total（全量），页内统计显式标注"本页"。
+  //    用 items.length 当总数会让这个数字随翻页变化，看起来像指令在丢。
   const items = cmds.data?.items ?? []
-  const pending = items.filter((c) => c.status === 'pending').length
+  const pagePending = items.filter((c) => c.status === 'pending').length
 
   return (
     <Card
       title="指令记录"
       subtitle={
-        `最近 ${items.length} 条` +
-        (pending > 0
-          ? ` · ⚠ ${pending} 条仍为 pending（设备未取走 —— 检查它是否在上报心跳）`
+        `共 ${cmds.data?.total ?? 0} 条 · 本页 ${items.length} 条` +
+        (pagePending > 0
+          ? ` · ⚠ 本页 ${pagePending} 条仍为 pending（设备未取走 —— 检查它是否在上报心跳）`
           : ' · 指令会随设备下一次心跳送达（约 30 秒内）')
       }
       actions={
@@ -66,9 +89,7 @@ export default function Commands({ autoMs, refreshKey, notify }: Props) {
                 <span className="text-slate-300">{c.kind}</span>
                 <div className="mt-0.5 font-mono text-[11px] text-slate-600">{c.id}</div>
               </Td>
-              <Td className="font-mono text-[11px] text-slate-400">
-                {c.device_id.length > 12 ? `${c.device_id.slice(0, 8)}…` : c.device_id}
-              </Td>
+              <Td className="font-mono text-[11px] text-slate-400">{shortId(c.device_id)}</Td>
               <Td className="text-slate-400">{fmtTime(c.created_at)}</Td>
               <Td className="text-slate-400">{fmtTime(c.delivered_at)}</Td>
               <Td className="text-slate-400">{fmtTime(c.finished_at)}</Td>

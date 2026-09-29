@@ -18,7 +18,9 @@ import { getDevice } from '../device/device_store.js'
 import {
   createTask,
   findInFlightByDevice,
+  finishTask,
   getTask,
+  newTaskId,
 } from '../task/task_store.js'
 import {
   diagnoseNoCandidate,
@@ -193,6 +195,13 @@ export async function dispatchTo(
   //    → 同一个帖子下面出现两条一模一样的话术，正是这条约束要防的事。
   //    改用 `INSERT ... ON CONFLICT DO NOTHING RETURNING`：**插入成功才算抢到**，
   //    与 `posts.committed` 的条件 UPDATE 同一套路。
+  // ⚠ 先给任务生成 ID，**再**抢素材：素材占位行要带着 task_id 一起落库。
+  //    早期是「占位（task_id=NULL）→ 建任务 → 回填 task_id」，进程若恰好死在"建任务"与
+  //    "回填"之间，那些素材行的 task_id 永远是 NULL —— 于是任务失败时按 task_id 回收
+  //    （task_store.finishTask 的 `DELETE ... WHERE task_id = ?`）**一行都删不掉**，
+  //    素材被永久吃掉：该帖可用话术越来越少，最后静默地再也派不出去。
+  const taskId = newTaskId()
+
   const refs = [`script:${candidate.script_id}`]
   if (commentType === 'image' && candidate.image_hash) refs.push(`image:${candidate.image_hash}`)
 
@@ -211,8 +220,8 @@ export async function dispatchTo(
 
   for (const ref of refs) {
     const got = (await sql`
-      INSERT INTO post_material_usage (post_id, material_ref)
-      VALUES (${candidate.id}, ${ref})
+      INSERT INTO post_material_usage (post_id, material_ref, task_id)
+      VALUES (${candidate.id}, ${ref}, ${taskId})
       ON CONFLICT (post_id, material_ref) DO NOTHING
       RETURNING material_ref
     `) as unknown as { material_ref: string }[]
@@ -227,10 +236,10 @@ export async function dispatchTo(
     claimedRefs.push(ref)
   }
 
-  // ── 建任务 ──
-  let taskId: string
+  // ── 建任务（ID 已在抢素材之前生成，素材占位行已带上它）──
   try {
-    const task = await createTask({
+    await createTask({
+      id: taskId,
       deviceId: device.id,
       postId: candidate.id,
       scriptId: candidate.script_id,
@@ -240,7 +249,6 @@ export async function dispatchTo(
       imagePath: candidate.image_path ?? undefined,
       dispatchIpCity: city,
     })
-    taskId = task.id
   } catch (e) {
     // 部分唯一索引 `uq_tasks_device_inflight` 兜住「一台设备两条在途任务」的并发窗口：
     // 命中唯一冲突说明本设备已经拿到别的任务了 —— 回滚帖子名额、当日配额与素材占位。
@@ -252,18 +260,21 @@ export async function dispatchTo(
     return { task: null, reason: NO_DISPATCH_REASONS.DEVICE_BUSY, retryAfterSeconds: 60 }
   }
 
-  // 补登 task_id：任务失败/中止时按 task_id 精确回收素材（见 task_store.finishTask）
-  await sql`
-    UPDATE post_material_usage SET task_id = ${taskId}
-    WHERE post_id = ${candidate.id} AND material_ref IN ${sql(claimedRefs)}
-  `
+  // 素材占位行在抢占时就已写入 task_id（见上面的说明），这里不再需要回填
   await recordDispatch(device.id, city)
 
   const pkg = await toTaskPackage(taskId)
   if (!pkg) {
-    // 原来这里不判空就返回 `{ task: pkg }`，会让设备收到 null 任务包而超时转 unknown，
-    // 同时配额与素材已被占用 —— 现在显式失败，让设备稍后重试。
-    log.error(`dispatch taskPackage null task=${taskId}`)
+    // 任务已落库、但任务包组装不出来（例如帖子刚被删掉）→ 必须**显式终结**它：
+    // 否则它会一直挂在 dispatched，占着帖子名额与设备当日配额整整一个回执超时周期
+    // （15 分钟），期间该帖少一个名额、该设备少一次配额，而日志只有一行 error。
+    // 早期这里既不回滚也不终结，直接把上面刚占的占位漏在了那里。
+    log.error(`dispatch taskPackage null task=${taskId} → 立即中止该任务并释放占位`)
+    await finishTask(taskId, 'aborted', {
+      actor: 'platform',
+      reasonCode: 'task_package_unavailable',
+      evidence: 'toTaskPackage returned null',
+    })
     return { task: null, reason: NO_DISPATCH_REASONS.NO_POST_AVAILABLE, retryAfterSeconds: 60 }
   }
   log.info(

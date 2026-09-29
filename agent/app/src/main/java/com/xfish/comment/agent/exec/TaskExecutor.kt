@@ -45,6 +45,15 @@ object TaskExecutor {
 
     private const val TAG = "exec"
 
+    /**
+     * 点「发送」后用于**确认提交生效**的轮询窗口（毫秒）。
+     *
+     * 取 4.5 秒：太短会把"其实已经发出、界面还没刷新"判成未生效而**重复点发送**
+     * （同帖两条评论，撤不回来）；太长会让确实失败的场景拖慢整个任务
+     * （后面还有步骤 11 的完整校验）。
+     */
+    private const val SEND_CONFIRM_WINDOW_MS = 4_500L
+
     /** 执行结果（对应后台任务终态） */
     data class Outcome(
         val status: String,          // succeeded / failed / aborted / unknown
@@ -167,6 +176,18 @@ object TaskExecutor {
             riskOrNull()?.let { return finish(it.copy(startedAt = startedAt), task, reporter) }
             Log.i(TAG, "步骤5-a 唤起抖音完成：耗时=${Time.elapsedMs() - t5}ms 页面=${AutoService.currentPage()}")
 
+            // 打开短链**之前**先取两个基线（顺序不能颠倒）：
+            //  · wasOnDetail：此刻是否已经在详情页 —— 这正是旧实现会误判通过的情形
+            //  · tLink：复位"见过详情页"标记，之后只认本次跳转**触发**的详情页
+            val wasOnDetail = AutoService.sawDetailPage()
+            val tLink = AutoService.resetDetailMarker()
+            if (wasOnDetail) {
+                Log.w(
+                    TAG,
+                    "打开短链前已在详情页（可能是上一轮任务残留 / 用户正在刷抖音）" +
+                        "→ 本轮要求出现**新的**详情页事件，避免停在旧页面上误判",
+                )
+            }
             if (!Actions.openShortLink(context, task.postUrl)) {
                 return finish(Outcome("failed", Config.Reason.DOUYIN_NOT_LAUNCHED, "short_link_failed", startedAt = startedAt), task, reporter)
             }
@@ -185,7 +206,9 @@ object TaskExecutor {
                     "短链打开后抖音未进入前台（已等 ${waitedMs}ms，可能短链失效或落入浏览器）" +
                         "页面=${AutoService.currentPage()}",
                 )
-                return finish(Outcome("aborted", Config.Reason.LOGIN_INVALID, "douyin_not_foreground", startedAt = startedAt), task, reporter)
+                // 原因码用「未唤起抖音」而非 LOGIN_INVALID：后者语义是"登录态失效"，
+                // 会让后台的失败归因指向完全错误的方向（运维去查账号，其实是短链没打开）。
+                return finish(Outcome("aborted", Config.Reason.DOUYIN_NOT_LAUNCHED, "douyin_not_foreground", startedAt = startedAt), task, reporter)
             }
             Log.i(TAG, "步骤5-b 短链已进入抖音：等待=${waitedMs}ms 页面=${AutoService.currentPage()}")
 
@@ -194,17 +217,20 @@ object TaskExecutor {
             //    短链失效停在首页时也会通过 —— 那样就会给一个**错误的视频**发评论，
             //    而回执还是 succeeded（2026-09-28 实测：入口确认仅 23ms 就"通过"了，
             //    当时页面其实是 homepage...CustomRelativeLayout）。
-            // 改为「**详情页出现过**」（短链解析成功的可靠标志）＋「评论入口可读」。
+            // ⚠ 也不能只是「最近 15 秒内出现过详情页」：设备可能**正停在上一轮任务留下的
+            //    详情页**上（或用户刚在看别的视频），短链再失效也照样通过。
+            //    所以改为要求详情页是**打开短链之后**才出现的（tLink 之后才有窗口事件）。
             val tPost = Time.elapsedMs()
-            var onPost = AutoService.awaitDetailPage(8_000) &&
-                NodeFinder.waitFor(DouyinLocators.commentEntry, timeoutMs = 3_000) != null
+            var onPost = confirmTargetDetailPage(tLink, wasOnDetail)
 
             if (!onPost) {
-                // 短链可能没被解析（停在首页 / 推荐流）→ 重投一次短链再判一次
-                Log.w(TAG, "首次未确认详情页（页面=${AutoService.currentPage()}），重投一次短链")
+                // 短链可能没被解析（停在首页 / 推荐流）→ 重投一次短链再判一次。
+                // ⚠ 重投时**不给兜底**：此刻页面上可能是别的视频详情页，
+                //    必须要求出现新的详情页事件才算数。
+                Log.w(TAG, "首次未确认目标详情页（页面=${AutoService.currentPage()}），重投一次短链")
+                val tRetry = AutoService.resetDetailMarker()
                 Actions.openShortLink(context, task.postUrl)
-                onPost = AutoService.awaitDetailPage(8_000) &&
-                    NodeFinder.waitFor(DouyinLocators.commentEntry, timeoutMs = 3_000) != null
+                onPost = confirmTargetDetailPage(tRetry, wasOnDetailBefore = true)
             }
 
             if (!onPost) {
@@ -349,24 +375,42 @@ object TaskExecutor {
                 )
             }
             // 实测：抖音的「发送」是 clickable=false 的 TextView，控件点击可能落在错误的祖先上，
-            // 表现为「点完发送但文本仍在输入框」。改为「点击 → 验证输入框是否清空 → 重试」。
+            // 表现为「点完发送但文本仍在输入框」。改为「点击 → 验证是否生效 → 重试」。
+            //
+            // ⚠ 重试必须**有据可依**：早期是「点击 → 盲等 900ms → 输入框仍有话术就再点」，
+            //    若第 1 次其实已发出、只是界面尚未刷新，第 2/3 次会**再发一条**
+            //    （同一帖子下两条评论，撤不回来）。现在每次点击后轮询正向证据
+            //    （输入框清空 / 评论数 +1），只有**确认话术仍留在输入框**（= 明确没发出去）
+            //    才允许再点一次，且最多 2 次。
             riskOrNull()?.let { return finish(it.copy(startedAt = startedAt), task, reporter) }
             var submitted = false
-            for (attempt in 0..2) {
+            for (attempt in 0..1) {
                 val send = NodeFinder.find(DouyinLocators.sendButton)
                     ?: NodeFinder.waitFor(DouyinLocators.sendButton, timeoutMs = 2_000)
                     ?: break
                 Actions.click(send, preferGesture = attempt > 0)
-                delay(900)
-                if (!inputStillHasScript(signature)) {
-                    submitted = true
-                    Log.i(TAG, "发送已点击（第 ${attempt + 1} 次），输入框已不含话术")
+                val tConfirm = Time.elapsedMs()
+                while (Time.elapsedMs() - tConfirm < SEND_CONFIRM_WINDOW_MS) {
+                    if (!inputStillHasScript(signature)) {
+                        submitted = true
+                        break
+                    }
+                    delay(Rnd.long(400, 700))
+                    // 第二个正向证据：评论数 +1（评论正文读不到，计数可读）
+                    if (commentCountGrew(commentCountBefore, readCommentCount())) {
+                        submitted = true
+                        Log.i(TAG, "发送后评论数已 +1，确认提交生效")
+                        break
+                    }
+                }
+                if (submitted) {
+                    Log.i(TAG, "发送已点击（第 ${attempt + 1} 次），已确认提交生效")
                     break
                 }
-                Log.w(TAG, "第 ${attempt + 1} 次点击发送未生效（输入框仍含话术），重试")
+                Log.w(TAG, "第 ${attempt + 1} 次点击发送未生效（话术仍在输入框），重试一次")
             }
             if (!submitted) {
-                Log.w(TAG, "发送点击后输入框未清空 → 判定提交失败")
+                Log.w(TAG, "发送点击后话术仍在输入框 → 判定提交失败（确认未发出）")
                 return finish(Outcome("failed", Config.Reason.SUBMIT_FAILED, "send_button_not_effective", startedAt = startedAt), task, reporter)
             }
             Log.i(TAG, "已点击发送，等待结果……")
@@ -728,18 +772,56 @@ object TaskExecutor {
     }
 
     /**
+     * 确认已进入**目标视频**的详情页。
+     *
+     * 两层判据：
+     *  ① 详情页窗口事件必须发生在 [sinceMs] **之后** —— 即由本次短链跳转触发，
+     *    而不是"打开前就已经在的旧详情页"（旧页面残留是发错视频的主要来源）；
+     *  ② 评论入口可读（首页推荐流的视频同样有入口，单靠它不足以判定）。
+     *
+     * 兜底：抖音有可能复用同一个 DetailActivity（不产生新的窗口事件），此时 ① 会误判为失败；
+     *   仅在「打开短链前**并不在**详情页」时才允许退回 ② —— 那种状态下"页面上是详情页"
+     *   本身就说明跳转生效了。而 [wasOnDetailBefore] = true 的模糊情形必须从严：
+     *   **宁可这个任务失败（可重派），也不能把评论发到错误的视频上（撤不回来）。**
+     *
+     * 注：真正意义上的"身份校验"需要能读到页面上的帖子标题/作者并与任务比对。
+     *   当前 `posts.title` 仍是占位文案（如"测试帖子·上海（占位链接…）"），不能作判据；
+     *   等帖子池换成真实链接后再补这一层。
+     */
+    private suspend fun confirmTargetDetailPage(
+        sinceMs: Long,
+        wasOnDetailBefore: Boolean,
+    ): Boolean {
+        val fresh = AutoService.awaitDetailPageSince(sinceMs, 8_000)
+        if (!fresh) {
+            if (wasOnDetailBefore) {
+                Log.w(
+                    TAG,
+                    "短链打开后未出现新的详情页事件，且打开前已在详情页 → 无法确认这就是目标视频，" +
+                        "拒绝发送（宁可失败，也不能把评论发到别的视频上）",
+                )
+                return false
+            }
+            Log.i(TAG, "短链未产生新的详情页事件（可能复用了页面），回退到「当前就在详情页」判据")
+        }
+        return NodeFinder.waitFor(DouyinLocators.commentEntry, timeoutMs = 3_000) != null
+    }
+
+    /**
      * 输入框（EditText）是否仍持有本次话术 —— 判断「提交是否真正生效」的唯一标准。
      *
      * 说明：
-     *  · 不要求输入框处于聚焦态（发送后键盘可能收起），只要界面上还有 EditText
+     *  · 不要求输入框处于聚焦态（发送后键盘可能收起），只要界面上**还有** EditText
      *    且其文本含本次话术特征串，就说明提交没生效；
      *  · 找不到 EditText 时返回 false（**不重试**）——宁可少判一次，
      *    也不能因误判而重复点击发送、发出两条评论。
+     *
+     * ⚠ 必须扫**全部**可编辑节点，不能只看"树序第一个 EditText"：图文评论贴图后页面上
+     *   同时存在两个 EditText（折叠态底栏在前、展开态编辑框在后），第一个是空的底栏，
+     *   只看它会让本函数恒返回 false —— 发送判定与步骤 11 的校验一起失真。
      */
-    private fun inputStillHasScript(signature: String): Boolean {
-        val edit = NodeFinder.find(DouyinLocators.editableField) ?: return false
-        return edit.text?.toString().orEmpty().contains(signature)
-    }
+    private fun inputStillHasScript(signature: String): Boolean =
+        Actions.anyEditableContains(signature)
 
     /**
      * 读取当前页面的评论数（抖音按钮 desc 形如「评论7，按钮」，评论面板展开/收起态都存在）。

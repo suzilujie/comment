@@ -18,6 +18,8 @@ import com.xfish.comment.agent.net.ReceiptReq
 import com.xfish.comment.agent.net.TaskPackageDto
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.put
 
 /**
  * 状态上报器（设计文档 §4.4 第 3 条链：回传执行状态）。
@@ -73,6 +75,47 @@ class Reporter(private val context: Context) : TaskExecutor.Reporter {
         }
 
         Bus.emit(Bus.Events.TASK_FINISHED, "${outcome.status}/${outcome.reasonCode ?: "-"}")
+    }
+
+    /**
+     * 崩溃 / 断电恢复：把一条**未决记录**按 `unknown` 上报。
+     *
+     * ⚠ 必须走**回执通道**，不能用 `task_aborted` 事件：
+     *   后台把 `task_aborted` 一律落成 `aborted`，而 aborted 的语义是「**确认未发出**」——
+     *   会退还当日配额并**释放帖子名额**，于是同一设备可以被**重新派到同一帖**；
+     *   可这条评论其实**可能已经发出去了**（进程是在评论发出之后才被杀的）
+     *   → 同一个帖子下面出现两条评论，撤不回来。
+     *
+     *   本地既然记的是 `UNKNOWN`，上报口径就必须一致：unknown 不退还、继续占着名额、转人工核对。
+     */
+    suspend fun reportUnknownAfterCrash(taskId: String, postUrl: String?) {
+        val now = Time.nowMs()
+        val req = ReceiptReq(
+            deviceId = Prefs.deviceId(context),
+            taskId = taskId,
+            status = "unknown",
+            reasonCode = "crash_recovery_unknown",
+            evidence = "crash_recovery",
+            idempotencyKey = "$taskId:unknown:$now",
+            finishedAt = now,
+            detail = buildJsonObject {
+                put("note", "进程重启，无法确认是否已发出，请人工核对")
+                if (!postUrl.isNullOrBlank()) put("postUrl", postUrl)
+            },
+        )
+        val payload = json.encodeToString(ReceiptReq.serializer(), req)
+        try {
+            val ack = Api.receipt(req)
+            markReported(taskId, handleAck(taskId, ack))
+            Log.i(TAG, "崩溃恢复回执已送达：$taskId → unknown（禁止自动重试）")
+        } catch (e: Exception) {
+            Log.w(TAG, "崩溃恢复回执上报失败，转本地队列：${e.message}")
+            enqueueReceipt(
+                taskId,
+                TaskExecutor.Outcome("unknown", "crash_recovery_unknown", "crash_recovery"),
+                payload,
+            )
+        }
     }
 
     /** 上报一条事件（开工 / 中止 / 切 IP / 指令结果 / 自检结果） */

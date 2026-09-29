@@ -9,9 +9,9 @@
  *   /health       健康检查
  */
 import { Hono } from 'hono'
-import { cors } from 'hono/cors'
+import type { Context, Next } from 'hono'
 import { serveStatic } from 'hono/bun'
-import { config } from './config.js'
+import { config, configWarnings } from './config.js'
 import { createLogger } from './logger.js'
 import { on, EVENTS } from './bus.js'
 import { closePg, ensureSchema, ping } from './db_pg.js'
@@ -20,6 +20,7 @@ import { listDevices } from './device/device_store.js'
 import { listTasks } from './task/task_store.js'
 import { listCityPool } from './post/post_store.js'
 import adminRoute from './admin/admin_routes.js'
+import { tokenOf, verify } from './admin/admin_auth.js'
 import heartbeatRoute from './agent_api/heartbeat_api.js'
 import claimRoute from './agent_api/claim_api.js'
 import eventRoute from './agent_api/event_api.js'
@@ -27,6 +28,35 @@ import receiptRoute from './agent_api/receipt_api.js'
 
 const log = createLogger('main')
 const app = new Hono()
+
+// 启动期配置告警（见 config.ts 的 configWarnings）。
+// 这些配置问题**不会让进程起不来**，只会在运行时表现成"说不通的怪现象"
+// （密钥是公开默认值 → 谁都能伪造登录；时段写成 "8" → 窗口从零点开始）。
+for (const w of configWarnings) log.warn(`⚠ 配置：${w}`)
+if (config.admin.password === 'admin') {
+  log.warn(
+    '⚠ 配置：ADMIN_PASSWORD 仍是默认值 admin —— 请务必在 .env 里改掉' +
+      '（管理台可以下发指令、增删帖子与素材，等同后台控制权）',
+  )
+}
+
+/**
+ * 旧看板接口的鉴权守卫。
+ *
+ * ⚠ `/api/devices`、`/api/tasks`、`/api/city-pool` 是早期看板留下的兼容接口，
+ *   此前**没有任何鉴权**：任何能访问到端口的人都能拉走全量设备清单与任务历史
+ *   （含帖子短链、话术、设备 IP 与属地）。新前端只走 `/api/admin/*`，这几个已无人使用，
+ *   因此直接补上与管理台一致的 Bearer 校验。
+ *
+ * 注：`/materials/*` 仍保持开放 —— 设备端靠它拉取图片素材（任务包里只有 URL，
+ *   没有管理台 token），属于**有意为之**；素材本身是待发布的评论配图，敏感度低。
+ */
+async function requireAdmin(c: Context, next: Next): Promise<Response | void> {
+  if (!verify(tokenOf(c.req.header('Authorization')))) {
+    return c.json({ ok: false, error: '未登录或登录已过期' }, 401)
+  }
+  await next()
+}
 
 // ⚠ 必须注册 ALERT 订阅者。
 // `bus` 是「只发不收」的进程内事件总线，而全项目原本**零订阅者** ——
@@ -47,7 +77,48 @@ on(EVENTS.ALERT, (payload) => {
   else log.warn(line)
 })
 
-app.use('*', cors())
+// ── CORS ─────────────────────────────────────────────────────
+// ⚠ 原来是 `cors()`，等价于 `Access-Control-Allow-Origin: *` —— 任何网页都能跨域读取本服务的
+//    响应。与下面几个未鉴权的旧接口叠加，等于"打开一个恶意页面就能把设备清单拖走"。
+//    现在只放行三类来源：
+//      · 同源（浏览器不发 Origin 头，例如后台自带的前端）；
+//      · 本机（localhost / 127.0.0.1 / ::1，任意端口，覆盖 Vite 调试端口）；
+//      · 与请求 Host **同一台机器**的来源 —— 内网里常从另一台电脑用 IP 直连后台，
+//        这种情况下 Origin 的 host 与 Host 头一致；
+//    另可用 `CORS_ALLOWED_ORIGINS`（逗号分隔）显式追加。
+const extraOrigins = new Set(
+  (process.env.CORS_ALLOWED_ORIGINS ?? '')
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean),
+)
+
+app.use('*', async (c, next) => {
+  const origin = c.req.header('Origin')
+  if (origin) {
+    let originHost = ''
+    try {
+      originHost = new URL(origin).hostname
+    } catch {
+      originHost = ''
+    }
+    const reqHost = (c.req.header('Host') ?? '').split(':')[0] ?? ''
+    const isLocal = originHost === 'localhost' || originHost === '127.0.0.1' || originHost === '::1'
+    const sameMachine = reqHost !== '' && originHost === reqHost
+    if (isLocal || sameMachine || extraOrigins.has(origin)) {
+      c.header('Access-Control-Allow-Origin', origin)
+      c.header('Vary', 'Origin')
+      c.header('Access-Control-Allow-Methods', 'GET,POST,PATCH,PUT,DELETE,OPTIONS')
+      c.header('Access-Control-Allow-Headers', 'Authorization,Content-Type')
+      c.header('Access-Control-Max-Age', '600')
+    } else if (c.req.method === 'OPTIONS') {
+      // 不在白名单：不回任何 CORS 头 → 浏览器侧直接拦掉
+      return c.body(null, 403)
+    }
+  }
+  if (c.req.method === 'OPTIONS') return c.body(null, 204)
+  await next()
+})
 
 // 访问日志（debug 级别，避免刷屏）
 app.use('*', async (c, next) => {
@@ -81,7 +152,8 @@ app.get('/health', async (c) => {
 app.route('/api/admin', adminRoute)
 
 // ── 看板数据（旧接口，保留兼容；新前端统一用 /api/admin/*）──────
-app.get('/api/devices', async (c) => {
+// ⚠ 这三个接口此前完全裸奔（见 requireAdmin 的说明），现统一要求管理台 token。
+app.get('/api/devices', requireAdmin, async (c) => {
   const items = await listDevices()
   const now = Date.now()
   return c.json({
@@ -94,12 +166,12 @@ app.get('/api/devices', async (c) => {
   })
 })
 
-app.get('/api/tasks', async (c) => {
+app.get('/api/tasks', requireAdmin, async (c) => {
   const limit = Number.parseInt(c.req.query('limit') ?? '100', 10)
   return c.json({ items: await listTasks(Number.isFinite(limit) ? limit : 100) })
 })
 
-app.get('/api/city-pool', async (c) => c.json({ items: await listCityPool() }))
+app.get('/api/city-pool', requireAdmin, async (c) => c.json({ items: await listCityPool() }))
 
 // ── 素材下载（内网通道）──────────────────────────────────────
 // ⚠ Hono 的 serveStatic 是 `root + 完整请求路径` 拼接的：不剥掉挂载前缀的话，

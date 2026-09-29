@@ -28,7 +28,22 @@ route.post('/', async (c) => {
     return c.json({ ...buildAck({ ok: false, serverTimeMs: nowMs(), message: 'task not found' }) }, 404)
   }
 
-  // 幂等：已是终态则只记录事件，不重复记账
+  // ⚠ 归属校验：只允许**任务所属的那台设备**上报该任务的回执。
+  //    早期只校验"设备已登记"，于是任一设备都能终结**别人**的任务 —— 会污染对方的
+  //    计数与帖子名额（把别人的任务改成 succeeded/failed），且事后极难归因到"谁改的"。
+  if (task.device_id && task.device_id !== device.id) {
+    log.warn(
+      `receipt device mismatch task=${data.taskId} owner=${task.device_id} sender=${device.id} → reject`,
+    )
+    return c.json(
+      { ...buildAck({ ok: false, serverTimeMs: nowMs(), message: 'task not owned by this device' }) },
+      403,
+    )
+  }
+
+  // 幂等：已是终态则只记录事件，不重复记账。
+  // ⚠ 这里**不含 unknown** —— unknown 不是终态，迟到的真回执应当能把它收敛成确定结论
+  //    （finishTask 内部有原子守卫，重复/并发终结不会重复记账）。
   if (['succeeded', 'failed', 'aborted'].includes(task.status)) {
     log.warn(`receipt duplicate task=${data.taskId} current=${task.status} ignore`)
     await appendEvent(data.taskId, 'receipt_duplicate', 'device', data.reasonCode, {

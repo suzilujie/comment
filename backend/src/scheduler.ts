@@ -10,7 +10,7 @@ import { config } from './config.js'
 import { createLogger } from './logger.js'
 import { emit, EVENTS } from './bus.js'
 import { db } from './db_pg.js'
-import { finishTask, findOverdueTasks } from './task/task_store.js'
+import { finishTask, findOverdueTasks, reconcileCounters } from './task/task_store.js'
 import { humanAgo, nowMs, parseMs } from './datetime.js'
 
 const log = createLogger('scheduler')
@@ -155,7 +155,12 @@ export function startScheduler(): void {
       try {
         await scanOverdueTasks()
         await scanOfflineDevices()
-        if (tick % 10 === 0) await refreshCityPool()
+        if (tick % 10 === 0) {
+          await refreshCityPool()
+          // 对账计数：派单是「先占位、再建任务」的两步非事务操作，
+          // 中间崩溃会让 posts.committed / devices.daily_done 永久虚高（见 reconcileCounters）。
+          await reconcileCounters()
+        }
         if (tick % 2880 === 0) await pruneHistory() // 30s × 2880 = 24 小时
       } catch (e) {
         log.error('scheduler tick failed:', e)
@@ -169,6 +174,7 @@ export function startScheduler(): void {
       await scanOverdueTasks()
       await scanOfflineDevices()
       await refreshCityPool()
+      await reconcileCounters()
     } catch (e) {
       log.error('scheduler warmup failed:', e)
     }

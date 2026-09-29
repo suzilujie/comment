@@ -139,6 +139,35 @@ class AutoService : AccessibilityService() {
             return sawDetailPage()
         }
 
+        /**
+         * 复位「见过详情页」标记，返回复位时刻。
+         *
+         * ⚠ 为什么需要它：短链解析失败时，设备可能**正停在上一轮任务留下的详情页**上 ——
+         *   此时 [sawDetailPage] 依然为 true（15 秒窗口内），"已进入目标视频"被误判通过，
+         *   评论就发到**上一个视频**上，而且回执还是 succeeded。
+         *   打开短链**之前**先清零，之后只认"本次跳转触发的新详情页"，即可挡下这种情况。
+         */
+        fun resetDetailMarker(): Long {
+            lastDetailAt = 0L
+            return SystemClock.elapsedRealtime()
+        }
+
+        /**
+         * 等待「**[sinceMs] 之后**出现过详情页」。
+         *
+         * 与 [awaitDetailPage] 的区别：后者只要求"最近 15 秒内有过详情页"，
+         * 而那个页面可能是打开短链**之前**就存在的旧页面；这里要求窗口事件发生在给定时刻之后，
+         * 即确由本次跳转触发。
+         */
+        suspend fun awaitDetailPageSince(sinceMs: Long, timeoutMs: Long = 8_000L): Boolean {
+            val t0 = SystemClock.elapsedRealtime()
+            while (SystemClock.elapsedRealtime() - t0 < timeoutMs) {
+                if (lastDetailAt > sinceMs) return true
+                delay(250)
+            }
+            return lastDetailAt > sinceMs
+        }
+
         /** 抖音是否在前台 */
         fun douyinForeground(): Boolean {
             val pkg = currentPackage() ?: return false

@@ -78,7 +78,9 @@ CREATE TABLE IF NOT EXISTS posts (
   city             TEXT NOT NULL,                  -- 调度口径：城市
   title            TEXT,
   author           TEXT,
-  target_count     INTEGER NOT NULL DEFAULT 12,    -- 目标评论条数（10~15）
+  -- 目标评论条数（10~15）。CHECK 是**兜底**：服务端已校验 ≥1，但这条约束能挡住
+  -- 任何绕过 API 的写库路径 —— target_count<=0 的帖子会永远派不出去，且界面上不报异常。
+  target_count     INTEGER NOT NULL DEFAULT 12 CHECK (target_count > 0),
   status           TEXT NOT NULL DEFAULT 'active'
                    CHECK (status IN ('active', 'paused', 'done', 'invalid')),
   last_comment_at  TIMESTAMPTZ,                    -- 单帖节奏约束依据
@@ -129,6 +131,9 @@ CREATE INDEX IF NOT EXISTS idx_tasks_device_time ON tasks (device_id, dispatched
 CREATE INDEX IF NOT EXISTS idx_tasks_post_time ON tasks (post_id, dispatched_at DESC);
 -- 200 台规模化索引：同设备 × 同帖的当日去重查询（countDevicePostComments）
 CREATE INDEX IF NOT EXISTS idx_tasks_device_post ON tasks (device_id, post_id);
+-- 管理台任务列表按 dispatched_at DESC 分页（listTasks / countTasks）；没有这条索引时
+-- 每次翻页都要对全表排序（tasks 约 12 万行/月，很快会变成明显的慢查询）。
+CREATE INDEX IF NOT EXISTS idx_tasks_dispatched ON tasks (dispatched_at DESC);
 -- 「一台设备同时只允许 1 条在途任务」的 **DB 级兜底**。
 -- 应用层是「先 SELECT 查在途、再 INSERT 任务」的 check-then-act，中间隔着十几次
 -- await（200 台并发时窗口很大），并发下真的会派两条；这条部分唯一索引把它变成硬约束。
@@ -204,6 +209,9 @@ CREATE TABLE IF NOT EXISTS post_material_usage (
   created_at   TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   PRIMARY KEY (post_id, material_ref)
 );
+-- 任务失败/中止时按 task_id 精确回收素材（finishTask），管理台「释放名额」也走这条路径。
+-- 没有它时每次回收都要全表扫 post_material_usage（帖子越多越慢）。
+CREATE INDEX IF NOT EXISTS idx_pmu_task ON post_material_usage (task_id);
 
 -- ── 城市池（后台维护；设备端只读，用于纯随机跨城） ────────────
 CREATE TABLE IF NOT EXISTS city_pools (

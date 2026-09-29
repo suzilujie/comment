@@ -103,9 +103,11 @@ export default function Overview({ autoMs, refreshKey }: Props) {
         <StatCard
           label="帖子池"
           value={`${d?.postsActive ?? '-'} / ${(d?.postsActive ?? 0) + (d?.postsPaused ?? 0)}`}
-          hint={`启用 / 全部（暂停 ${d?.postsPaused ?? 0}）`}
+          // ⚠ 分母是「启用 + 暂停」，**不含已完成/失效**。原文案写"全部"，
+          //    容易被读成帖子总数（与真实总数对不上时会以为数据丢了）。
+          hint={`启用 / 启用+暂停（暂停 ${d?.postsPaused ?? 0}，不含已完成与失效）`}
         />
-        <StatCard label="可用话术" value={d?.scriptsEnabled ?? '-'} hint="enabled = true" />
+        <StatCard label="可用话术" value={d?.scriptsEnabled ?? '-'} hint="启用中的话术条数" />
         <StatCard label="激活省份池" value={d?.citiesActive ?? '-'} hint="下发给设备的切省目标" />
       </div>
 

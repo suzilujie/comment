@@ -5,6 +5,7 @@
  * 因此这里只做「类型收敛 + 默认值 + 单位换算」，不做文件解析。
  * 所有端口、阈值一律来自这里，代码中不允许散落硬编码。
  */
+import { randomBytes } from 'node:crypto'
 
 /** 读字符串 */
 function str(key: string, fallback: string): string {
@@ -35,10 +36,48 @@ function bool(key: string, fallback: boolean): boolean {
   return ['1', 'true', 'yes', 'on'].includes(v.trim().toLowerCase())
 }
 
-/** "08:30" → 510（当天第几分钟） */
-function timeToMinute(v: string): number {
+/**
+ * 启动期告警（由 main.ts 在建好 logger 后统一打印）。
+ *
+ * 存在的意义：这些配置问题**不会让进程起不来**，只会在运行时表现成"说不通的怪现象"
+ * （例如密钥是公开默认值 → 任何人可伪造登录；时段写成 "8" → 窗口从 0 点开始）。
+ * 静默降级是最难排查的一类问题，所以宁可吵一点。
+ */
+export const configWarnings: string[] = []
+
+/**
+ * 管理台 token 的签名密钥。
+ *
+ * ⚠ 早期是一个**写在仓库里**的默认值 `comment-admin-dev-secret-please-change`：
+ *   部署时只要忘了设 `ADMIN_TOKEN_SECRET`，任何人拿这个公开字符串就能离线伪造一个
+ *   未过期 token 直接通过校验（签名算法与过期校验本身都是对的，问题在于密钥人人皆知）。
+ *   现在：没配、或配的正是那个旧默认值 → **每个进程随机生成一把**并告警。
+ *   代价是重启后旧登录失效 —— 这本就是"没配密钥"应有的行为，比默默裸奔好得多。
+ */
+function adminSecret(): string {
+  const WEAK = 'comment-admin-dev-secret-please-change'
+  const raw = (process.env.ADMIN_TOKEN_SECRET ?? '').trim()
+  if (raw && raw !== WEAK) return raw
+  configWarnings.push(
+    raw
+      ? 'ADMIN_TOKEN_SECRET 仍是仓库里的默认值 → 已改用本次运行随机生成的密钥（重启后需重新登录）。请在 .env 里设置一个私有密钥。'
+      : '未设置 ADMIN_TOKEN_SECRET → 已改用本次运行随机生成的密钥（重启后需重新登录）。请在 .env 里设置一个私有密钥。',
+  )
+  return randomBytes(32).toString('base64url')
+}
+
+/**
+ * "08:30" → 510（当天第几分钟）。
+ *
+ * ⚠ 解析失败时返回 0 并**告警**：早期是静默返回 0，于是 `DISPATCH_WINDOW_START=8`
+ *   （漏了冒号）会变成"窗口从 00:00 开始"—— 看上去一切正常，实际全时段都在发评论。
+ */
+function timeToMinute(key: string, v: string): number {
   const m = /^(\d{1,2}):(\d{2})$/.exec(v.trim())
-  if (!m) return 0
+  if (!m) {
+    configWarnings.push(`${key}="${v}" 不是 HH:MM 格式，已按 00:00 处理（投产前请修正）`)
+    return 0
+  }
   const h = Number.parseInt(m[1] ?? '0', 10)
   const min = Number.parseInt(m[2] ?? '0', 10)
   return Math.max(0, Math.min(1439, h * 60 + min))
@@ -113,8 +152,8 @@ export const config = {
     dailyQuotaPerAccount: int('DAILY_QUOTA_PER_ACCOUNT', 20),
     intervalMinMinutes: int('INTERVAL_MIN_MINUTES', 30),
     intervalMaxMinutes: int('INTERVAL_MAX_MINUTES', 60),
-    windowStartMinute: timeToMinute(str('DISPATCH_WINDOW_START', '08:00')),
-    windowEndMinute: timeToMinute(str('DISPATCH_WINDOW_END', '22:00')),
+    windowStartMinute: timeToMinute('DISPATCH_WINDOW_START', str('DISPATCH_WINDOW_START', '08:00')),
+    windowEndMinute: timeToMinute('DISPATCH_WINDOW_END', str('DISPATCH_WINDOW_END', '22:00')),
     globalLimit: int('GLOBAL_DISPATCH_LIMIT', 3),
     globalWindowSeconds: int('GLOBAL_DISPATCH_WINDOW_SECONDS', 300),
     perPostMinIntervalMinutes: int('PER_POST_MIN_INTERVAL_MINUTES', 15),
@@ -140,7 +179,8 @@ export const config = {
   admin: {
     username: str('ADMIN_USERNAME', 'admin'),
     password: str('ADMIN_PASSWORD', 'admin'),
-    secret: str('ADMIN_TOKEN_SECRET', 'comment-admin-dev-secret-please-change'),
+    // 见 adminSecret()：绝不使用仓库里的默认密钥（那是可以离线伪造 token 的）
+    secret: adminSecret(),
     tokenTtlHours: int('ADMIN_TOKEN_TTL_HOURS', 12),
   } satisfies AdminConfig,
 } as const

@@ -24,17 +24,21 @@ export function useFetch<T>(fn: () => Promise<T>, deps: unknown[] = [], autoMs =
   const [error, setError] = useState<string | null>(null)
   const fnRef = useRef(fn)
   fnRef.current = fn
+  // ⚠ 请求序号：自动轮询与「写操作后 reload」很容易并发（例如删完立刻到轮询点），
+  //    谁后返回谁就覆盖 —— 表现为"刚改完的数据自己跳回旧值"。只认**最后一次发起**的结果。
+  const seqRef = useRef(0)
 
   const load = useCallback(async () => {
+    const seq = ++seqRef.current
     setLoading(true)
     setError(null)
     try {
       const r = await fnRef.current()
-      setData(r)
+      if (seq === seqRef.current) setData(r)
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e))
+      if (seq === seqRef.current) setError(e instanceof Error ? e.message : String(e))
     } finally {
-      setLoading(false)
+      if (seq === seqRef.current) setLoading(false)
     }
   }, [])
 
@@ -379,6 +383,15 @@ export function FilterSearch({
 export const DEFAULT_PAGE_SIZE = 10
 
 /**
+ * 长 ID 的短显示（`task_xxx…` 这类 26+ 字符的 ID 会把表格撑爆）。
+ *
+ * 抽到这里是因为它曾在 3 个页面各写一遍，细节还不一致（有的接受 null、有的不接受，
+ * 遇到空值会直接抛异常）。统一成一处，行为以更宽松的那版为准。
+ */
+export const shortId = (id: string | null | undefined): string =>
+  !id ? '-' : id.length > 12 ? `${id.slice(0, 8)}…` : id
+
+/**
  * 列表分页状态。
  *
  * 约定 `page` 从 **0** 开始；**改每页条数时自动回到第一页** ——
@@ -415,9 +428,16 @@ export function Pager({
   onPage: (p: number) => void
   onPageSize: (n: number) => void
 }) {
-  if (total === 0) return null
   const pages = Math.max(1, Math.ceil(total / pageSize))
   const cur = Math.min(Math.max(0, page), pages - 1)
+  // ⚠ 越界时必须把**真实页码**也拉回来，不能只夹住显示值（`cur`）：请求用的是未夹取的
+  //    `page`（offset = page × pageSize），于是会出现"表格是空的、下面却写着共 15 条 ·
+  //    当前 11–15"这种自相矛盾的画面 —— 在最后一页删掉一条数据就会触发。
+  //    （钩子必须放在下面那个 `total === 0 → return null` 之前，否则违反 Hooks 规则。）
+  useEffect(() => {
+    if (total > 0 && cur !== page) onPage(cur)
+  }, [total, cur, page, onPage])
+  if (total === 0) return null
   const from = cur * pageSize + 1
   const to = Math.min(total, (cur + 1) * pageSize)
   return (

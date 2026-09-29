@@ -55,6 +55,8 @@ export interface TaskRow {
 }
 
 interface CreateTaskInput {
+  /** 可选：由调用方预先给定。派单流程**必须**预先生成（见 dispatcher.dispatchTo 的说明） */
+  id?: string
   deviceId: string
   postId: string
   scriptId: string
@@ -65,10 +67,21 @@ interface CreateTaskInput {
   dispatchIpCity: string
 }
 
+/**
+ * 预生成任务 ID。
+ *
+ * 派单需要在**抢素材占位**时就把 `task_id` 写进 `post_material_usage` —— 否则只能先占位
+ * （task_id 为 NULL）、建任务后再回填，那个窗口里崩溃会让素材行永远没有 task_id，
+ * 任务失败时按 task_id 回收就删不到任何行（详见 dispatcher.dispatchTo）。
+ */
+export function newTaskId(): string {
+  return makeId('task')
+}
+
 /** 创建任务（派发那一刻创建；后台写入 dispatched） */
 export async function createTask(input: CreateTaskInput): Promise<TaskRow> {
   const sql = db()
-  const id = makeId('task')
+  const id = input.id ?? makeId('task')
   const deadline = addMinutes(nowMs(), config.dispatch.receiptTimeoutMinutes)
 
   await sql`
@@ -127,10 +140,25 @@ export async function markStarted(taskId: string): Promise<boolean> {
 }
 
 /**
+ * 真正终结的状态（**不包含 unknown**）。
+ *
+ * unknown 是"暂时无法判断"，它还占着帖子名额与配额，等人工订正 —— 所以它**不是终态**：
+ * 设备补上来的迟到回执（"其实我压根没点发送"）应当能把未知收敛成确定结论。
+ */
+const TERMINAL_STATUSES: readonly TaskStatus[] = ['succeeded', 'failed', 'aborted']
+
+/**
  * 任务终态（设备回执或后台超时判定）。
  * - succeeded：计入配额消耗，刷新 next_eligible_at
  * - failed / aborted（确认未发出）：退还配额
  * - unknown：不退还（可能已发出），转人工确认
+ *
+ * ⚠ 状态迁移与记账必须**原子**。早期实现是「`getTask` 读 status → 判断 → `UPDATE ... WHERE id`」，
+ *   而读与写之间隔着 await，UPDATE 又没有任何状态条件。于是同一任务的两个终结请求
+ *   （设备回执 + 管理员订正，或两条重复回执）可以**同时**读到 `unknown`、**同时**通过判断，
+ *   然后各扣一次 `posts.committed`、各加一次设备计数 —— 帖子容量被凭空放大，
+ *   后续该帖会超出 target_count 继续派单。
+ *   现在把条件写进 UPDATE 的 WHERE：只有一个请求能真正改到行，另一个拿到 0 行、不做任何记账。
  */
 export async function finishTask(
   taskId: string,
@@ -140,21 +168,39 @@ export async function finishTask(
   const sql = db()
   const task = await getTask(taskId)
   if (!task) return null
-  if (task.status === 'succeeded' || task.status === 'failed' || task.status === 'aborted') {
-    log.warn(`task ${taskId} already terminal (${task.status}), ignore ${status}`)
+
+  const prev = task.status
+  if (TERMINAL_STATUSES.includes(prev)) {
+    log.warn(`task ${taskId} already terminal (${prev}), ignore ${status}`)
+    return task
+  }
+  // 同态重复上报（超时扫描又跑了一轮、设备重发同一条回执）→ 直接忽略，否则计数会重复累加
+  if (prev === status) {
+    log.warn(`task ${taskId} already ${status}, ignore duplicate`)
     return task
   }
 
   const actor: Actor = opts.actor ?? (status === 'unknown' ? 'platform' : 'device')
-  await sql`
+  const updated = (await sql`
     UPDATE tasks SET
       status = ${status},
       reason_code = ${opts.reasonCode ?? null},
       evidence = ${opts.evidence ?? null},
       finished_at = NOW()
-    WHERE id = ${taskId}
-  `
+    WHERE id = ${taskId} AND status = ${prev}
+    RETURNING id
+  `) as unknown as { id: string }[]
+  if (updated.length === 0) {
+    // 被并发请求抢先终结：本次不记账，直接回读最新状态
+    log.warn(`task ${taskId} 状态已被并发改写（期望 ${prev}），忽略本次 ${status}，不重复记账`)
+    return getTask(taskId)
+  }
   await appendEvent(taskId, status, actor, opts.reasonCode, opts.detail)
+
+  // 从 unknown 收敛到确定结论时，要把当初记的那次 total_unknown 收回来 ——
+  // 否则计数器只增不减，看板上的"待人工确认"会永远停在历史峰值。
+  const fromUnknown = prev === 'unknown'
+  const unknownDelta = fromUnknown ? 1 : 0
 
   // ── 设备侧记账（2026-09-26 起由账号维度改为设备维度）──
   const finishedAt = nowMs()
@@ -163,6 +209,7 @@ export async function finishTask(
       await sql`
         UPDATE devices SET
           total_success = total_success + 1,
+          total_unknown = GREATEST(total_unknown - ${unknownDelta}, 0),
           fail_streak = 0,
           next_eligible_at = ${new Date(finishedAt + randomInt(
             config.dispatch.intervalMinMinutes,
@@ -180,13 +227,15 @@ export async function finishTask(
       await sql`
         UPDATE devices SET
           daily_done = GREATEST(daily_done - 1, 0),
+          total_unknown = GREATEST(total_unknown - ${unknownDelta}, 0),
           fail_streak = CASE WHEN ${accountFault} THEN fail_streak + 1 ELSE fail_streak END,
           total_fail = total_fail + 1,
           updated_at = NOW()
         WHERE id = ${task.device_id}
       `
       log.info(
-        `task fail ${taskId} reason=${opts.reasonCode ?? '-'} accountFault=${accountFault}`,
+        `task fail ${taskId} reason=${opts.reasonCode ?? '-'} accountFault=${accountFault}` +
+          `${fromUnknown ? '（由 unknown 收敛而来）' : ''}`,
       )
     } else {
       await sql`
@@ -238,6 +287,57 @@ export async function finishTask(
   emit(EVENTS.TASK_FINISHED, { taskId, status, reasonCode: opts.reasonCode })
   log.info(`task finished ${taskId} → ${status}${opts.reasonCode ? ` (${opts.reasonCode})` : ''}`)
   return getTask(taskId)
+}
+
+/**
+ * 对账：把 `posts.committed` / `devices.daily_done` 拉回与真实任务数一致。
+ *
+ * 为什么必须有它：派单是「先原子占位（committed+1、daily_done+1）→ 再建任务」的两步
+ * **非事务**操作（见 `dispatcher.dispatchTo`，中间还夹着素材抢占与多次 await）。
+ * 进程正好死在两步之间时，计数会**永久多 1**，而全仓没有任何地方会把它改回来 ——
+ * 于是该帖提前显示"满员"、再也派不出去（表现为"候选帖为空"，运维完全看不出原因）。
+ *
+ * 幂等、可随时执行（启动时 + 每 5 分钟一轮；也可由管理台手动触发）。
+ * 只修正计数偏差，不动任务状态本身。
+ */
+export async function reconcileCounters(): Promise<{ posts: number; devices: number }> {
+  const sql = db()
+  const today = localDateKey()
+
+  const posts = (await sql`
+    UPDATE posts p
+    SET committed = (SELECT COUNT(*)::int FROM tasks t
+                      WHERE t.post_id = p.id
+                        AND t.status IN ('succeeded','dispatched','executing','unknown')),
+        updated_at = NOW()
+    WHERE p.committed <> (SELECT COUNT(*)::int FROM tasks t
+                           WHERE t.post_id = p.id
+                             AND t.status IN ('succeeded','dispatched','executing','unknown'))
+    RETURNING p.id
+  `) as unknown as { id: string }[]
+
+  const devices = (await sql`
+    UPDATE devices d
+    SET daily_done = (SELECT COUNT(*)::int FROM tasks t
+                       WHERE t.device_id = d.id
+                         AND (t.dispatched_at AT TIME ZONE 'Asia/Shanghai')::date = ${today}::date
+                         AND t.status IN ('succeeded','dispatched','executing','unknown')),
+        updated_at = NOW()
+    WHERE d.daily_done_date = ${today}::date
+      AND d.daily_done <> (SELECT COUNT(*)::int FROM tasks t
+                            WHERE t.device_id = d.id
+                              AND (t.dispatched_at AT TIME ZONE 'Asia/Shanghai')::date = ${today}::date
+                              AND t.status IN ('succeeded','dispatched','executing','unknown'))
+    RETURNING d.id
+  `) as unknown as { id: string }[]
+
+  if (posts.length > 0 || devices.length > 0) {
+    log.warn(
+      `reconcile 修正 posts.committed ${posts.length} 条 / devices.daily_done ${devices.length} 条` +
+        `（派单占位与建任务之间的崩溃会留下这种偏差）`,
+    )
+  }
+  return { posts: posts.length, devices: devices.length }
 }
 
 /** 设备在途任务（一台设备同时只允许 1 条） */

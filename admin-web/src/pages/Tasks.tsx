@@ -10,6 +10,7 @@ import {
   FilterSearch,
   FilterSelect,
   Pager,
+  shortId,
   Spinner,
   Table,
   Td,
@@ -22,8 +23,6 @@ interface Props {
   refreshKey: number
   notify: (text: string, tone?: 'ok' | 'err' | 'info') => void
 }
-
-const shortId = (id: string) => (id.length > 12 ? `${id.slice(0, 8)}…` : id)
 
 function duration(task: TaskItem): string {
   if (!task.finished_at) return '进行中'

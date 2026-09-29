@@ -303,6 +303,14 @@ export async function diagnoseNoCandidate(
     WHERE p.status = 'active'
       AND p.city = ${city}
       AND p.committed < p.target_count
+      -- ⚠ 单帖节奏：候选查询里有这一条，**这里也必须一致**。
+      --    少了它，"刚被评论过、正在 15 分钟冷却期"的帖会被算进"可派却选不出素材"，
+      --    于是日志报「全城缺素材，请去补话术/图片」—— 而它们只是**还没到时候**，
+      --    运维照此去补一堆根本用不上的素材（归因错得毫无痕迹）。
+      AND (
+        p.last_comment_at IS NULL
+        OR p.last_comment_at < NOW() - ${`${config.dispatch.perPostMinIntervalMinutes} minutes`}::interval
+      )
       AND NOT EXISTS (
         SELECT 1 FROM tasks t2
         WHERE t2.device_id = ${deviceId} AND t2.post_id = p.id

@@ -290,15 +290,11 @@ class AgentService : Service() {
             Log.w(TAG, "发现 ${list.size} 条未决记录，按 unknown 处理（禁止自动重试）")
             for (rec in list) {
                 dao.markFinished(rec.taskId, com.xfish.comment.agent.data.LocalState.UNKNOWN, "crash_recovery", Time.nowMs())
-                reporter.sendEvent(
-                    event = "task_aborted",
-                    taskId = rec.taskId,
-                    reasonCode = "crash_recovery_unknown",
-                    detail = buildJsonObject {
-                        put("note", "进程重启，无法确认是否已发出，请人工核对")
-                        put("postUrl", rec.postUrl)
-                    },
-                )
+                // ⚠ 必须走**回执通道**上报 unknown，不能发 `task_aborted` 事件：
+                //    后台把 task_aborted 一律落成 aborted（语义 = "确认未发出"）→ 退还配额 +
+                //    释放帖子名额 → 同一设备会被**重新派到同一帖**；而这条评论其实可能已经发出去了
+                //    → 同帖两条评论。上报口径必须与本地记录（UNKNOWN）一致。
+                reporter.reportUnknownAfterCrash(rec.taskId, rec.postUrl)
             }
         }.onFailure { Log.w(TAG, "未决记录恢复失败：${it.message}") }
     }

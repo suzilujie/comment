@@ -133,15 +133,30 @@ export interface PostFilter {
  * ⚠ 这里刻意**不写 SQL 行内注释**：本片段会被嵌进 `WITH base AS (...)`，
  * 若片段里带 `--` 注释，注入位置一旦变化就会把后面的 SQL 一起注释掉。
  */
+/**
+ * 帖子「已占条数」的**唯一口径** —— 列表显示、判定「为什么派不出去」、以及派单门控必须一致。
+ *
+ * 口径 = 这四种状态之和（**unknown 也算占用**：它可能已经发出去了，占着名额才能防止同帖重复评论）。
+ *
+ * ⚠ 这里曾经是两套口径并行：显示用这个子查询、`blocked_reason` 却用 `posts.committed` 列。
+ *   两者一旦漂移（例如进程正好死在"占位"与"建任务"之间，列就永久多 1），同一张卡片会出现
+ *   「显示 2/12，却判定已满」的自相矛盾。现在统一走这个子查询；
+ *   列本身由 [reconcileCounters] 定期拉回一致（派单读的是列）。
+ */
+function committedExpr() {
+  const sql = db()
+  return sql`(SELECT COUNT(*)::int FROM tasks t
+                WHERE t.post_id = p.id
+                  AND t.status IN ('succeeded','dispatched','executing','unknown'))`
+}
+
 function postBaseSelect() {
   const sql = db()
   const today = localDateKey()
   return sql`
     SELECT
       p.id, p.url, p.city, p.post_type, p.status, p.title, p.target_count, p.last_comment_at,
-      (SELECT COUNT(*)::int FROM tasks t
-         WHERE t.post_id = p.id
-           AND t.status IN ('succeeded','dispatched','executing','unknown')) AS committed,
+      ${committedExpr()} AS committed,
       (SELECT COUNT(*)::int FROM tasks t
          WHERE t.post_id = p.id
            AND (t.dispatched_at AT TIME ZONE 'Asia/Shanghai')::date = ${today}::date) AS today_used,
@@ -151,7 +166,7 @@ function postBaseSelect() {
       (SELECT COUNT(*)::int FROM tasks t WHERE t.post_id = p.id AND t.status = 'failed')    AS failed,
       CASE
         WHEN p.status <> 'active' THEN NULL
-        WHEN p.committed >= p.target_count THEN NULL
+        WHEN ${committedExpr()} >= p.target_count THEN NULL
         WHEN NOT EXISTS (
           SELECT 1 FROM scripts s
           WHERE s.enabled = TRUE
@@ -163,7 +178,7 @@ function postBaseSelect() {
         WHEN (SELECT COUNT(*) FROM tasks t
                 WHERE t.post_id = p.id AND t.comment_type = 'image'
                   AND t.status IN ('succeeded', 'dispatched', 'executing'))
-             < GREATEST(1, ROUND((p.committed + 1)::numeric / 4))
+             < GREATEST(1, ROUND((${committedExpr()} + 1)::numeric / 4))
           AND NOT EXISTS (
             SELECT 1 FROM materials m
             WHERE m.enabled = TRUE
@@ -309,6 +324,14 @@ export async function resetDeviceCounters(deviceId: string): Promise<OpResult> {
  * 参数：
  *  · deviceId  ：只清该设备在该帖的当天占用（不传=清该帖当天所有占用）；
  *  · resetPacing：是否同时清「单帖节奏」的 last_comment_at（默认清，否则还要等 15 分钟）。
+ *
+ * ⚠ 实现方式做过一次修正（2026-09-29），原因是原实现（直接 `DELETE` 当天任务行）有两个方向性错误：
+ *   1. **会删掉今天已成功的任务**：既抹掉审计记录，又把「同设备 × 同帖只评一次」的防重复护栏
+ *      一起删了 —— 那台设备会被重新派到同一帖，同帖出现两条评论（撤不回来）；
+ *   2. **不同步 `posts.committed`**：派单门控读的是这一列，删了任务行却不减列，名额反而虚高，
+ *      帖子**再也派不出去** —— 与"释放名额"的初衷完全相反。
+ *   现在改为：只把**在途 / 未知**的任务按 `aborted` 收敛（语义 = 人工确认未发出），
+ *   名额、当日配额、素材占用全部由 [finishTask] 原子释放，任务行与事件**保留**（可审计）。
  */
 export async function releasePostSlot(
   postId: string,
@@ -320,29 +343,28 @@ export async function releasePostSlot(
   const today = localDateKey()
   const resetPacing = opts.resetPacing !== false
 
+  // 只挑**占着名额、且尚无确定结论**的任务：
+  //  · succeeded 不动 —— 它确实发出去了，删掉会解除防重复护栏
+  //  · failed / aborted 本来就不占名额，动它们没有意义
   const targets = (await sql`
     SELECT id FROM tasks
     WHERE post_id = ${postId}
       AND (dispatched_at AT TIME ZONE 'Asia/Shanghai')::date = ${today}::date
       ${opts.deviceId ? sql`AND device_id = ${opts.deviceId}` : sql``}
+      AND status IN ('dispatched', 'executing', 'unknown')
   `) as unknown as { id: string }[]
-  const ids = targets.map((t) => t.id)
 
-  let removedEvents = 0
-  let removedMaterials = 0
-  if (ids.length > 0) {
-    const ev = (await sql`
-      DELETE FROM task_events WHERE task_id IN ${sql(ids)} RETURNING id
-    `) as unknown as { id: number }[]
-    removedEvents = ev.length
-
-    // 素材占用按 task_id 精确回收（post_material_usage.task_id 有落库）
-    const mu = (await sql`
-      DELETE FROM post_material_usage WHERE task_id IN ${sql(ids)} RETURNING post_id
-    `) as unknown as { post_id: string }[]
-    removedMaterials = mu.length
-
-    await sql`DELETE FROM tasks WHERE id IN ${sql(ids)}`
+  let converged = 0
+  for (const t of targets) {
+    // 走统一终态入口：释放 posts.committed、退还当日配额、回收素材占位，
+    // 口径与设备回执 / 超时判定完全一致（避免这里再写一套减法而漂移）。
+    const updated = await finishTask(t.id, 'aborted', {
+      actor: 'manual',
+      reasonCode: 'admin_release_slot',
+      evidence: 'admin_release_slot',
+      detail: { source: 'admin_web', note: '人工核实未发出，释放当天名额' },
+    })
+    if (updated?.status === 'aborted') converged++
   }
 
   if (resetPacing) {
@@ -351,16 +373,16 @@ export async function releasePostSlot(
 
   log.info(
     `admin release-slot post=${postId} device=${opts.deviceId ?? '*'} ` +
-      `tasks=${ids.length} events=${removedEvents} materials=${removedMaterials} resetPacing=${resetPacing}`,
+      `converged=${converged}/${targets.length}（dispatched/executing/unknown → aborted）` +
+      `resetPacing=${resetPacing}`,
   )
   return {
     ok: true,
     detail: {
       postId,
       deviceId: opts.deviceId ?? null,
-      removedTasks: ids.length,
-      removedEvents,
-      removedMaterials,
+      convergedTasks: converged,
+      candidates: targets.length,
       resetPacing,
     },
   }
@@ -374,14 +396,14 @@ export async function releasePostSlot(
  *  · verdict = 'failed'    ：确认未发出 → 走 finishTask 的失败记账（退还当日配额），
  *    同时「同设备 × 同帖每天一次」的名额自然释放（failed 不计入占用）。
  *
- * 注意：unknown 判定时已给设备累加过 total_unknown，订正后需把该计数扣回，避免重复统计。
+ * ⚠ `total_unknown` 的扣回由 [finishTask] 内部完成（它知道这条是从 unknown 收敛来的）。
+ *   这里**不能再手工扣一次** —— 那是早期写法，会变成减 2，看板上的"待人工确认"会莫名少掉。
  */
 export async function resolveTask(
   taskId: string,
   verdict: 'succeeded' | 'failed',
   note?: string,
 ): Promise<OpResult> {
-  const sql = db()
   const task = await getTask(taskId)
   if (!task) return { ok: false, error: 'task not found' }
   if (task.status !== 'unknown') {
@@ -398,16 +420,17 @@ export async function resolveTask(
     detail: { source: 'admin_web', rule: 'unknown_to_manual', verdict, note: note ?? null },
   })
 
-  // 扣回 unknown 计数（finishTask 已按终态记账，不再重复统计）
-  if (task.device_id) {
-    await sql`
-      UPDATE devices SET total_unknown = GREATEST(total_unknown - 1, 0), updated_at = NOW()
-      WHERE id = ${task.device_id}
-    `
+  // finishTask 带原子守卫：若状态已被并发改写（设备补了迟到回执、或另一个人也点了订正），
+  // 它不会记账。这里必须如实报错 —— 否则界面显示"订正成功"，而实际什么都没发生。
+  if (!updated || updated.status !== verdict) {
+    return {
+      ok: false,
+      error: `订正未生效（任务当前状态为 ${updated?.status ?? '未知'}），请刷新后重试`,
+    }
   }
 
   log.info(`admin resolve task=${taskId} verdict=${verdict} device=${task.device_id ?? '-'}`)
-  return { ok: true, detail: { taskId, verdict, status: updated?.status ?? null, evidence } }
+  return { ok: true, detail: { taskId, verdict, status: updated.status, evidence } }
 }
 
 // ══════════════════════════════════════════════════════════
@@ -429,15 +452,54 @@ export interface PostInput {
   status?: 'active' | 'paused' | 'done' | 'invalid'
 }
 
+/**
+ * 帖子入参校验（新增与编辑共用）。
+ *
+ * ⚠ 这两条以前**服务端完全没有**，只在界面上做了软限制：
+ *  · `target_count` 原本只判 `Number.isFinite` → 可以写入 0 或负数。而派单条件是
+ *    `committed < target_count`，负数帖**永远派不出去**；更糟的是管理台的 `blocked_reason`
+ *    会提前为真（`committed >= target_count`）→ 界面连"派不出去"的提示都不显示，
+ *    属静默坏数据（schema 里也没有 CHECK 兜底）。
+ *  · `city` 没做白名单 → 可以写成「河北省」（多一个"省"字）。属地是**精确匹配**条件，
+ *    设备上报的是「河北」，于是这条帖子永远匹配不上，症状只是"一直领不到"，无法归因。
+ *    同一份数据，createCity 有严格白名单、createPost 却什么都不查 —— 两套标准。
+ */
+function validatePostInput(input: {
+  url?: string
+  city?: string
+  targetCount?: number
+}): string | null {
+  if (input.url !== undefined && !input.url.trim()) return 'url 不能为空'
+  if (input.city !== undefined) {
+    const c = input.city.trim()
+    if (!c) return 'city 不能为空'
+    if (!PROVINCE_SLUGS[c]) {
+      return (
+        `「${c}」不是标准省份名。属地是**精确匹配**条件，必须与设备上报的写法完全一致` +
+        `（写「河北省」会一条任务都派不出去）。请从下拉列表中选择规范的省份名。`
+      )
+    }
+  }
+  if (input.targetCount !== undefined) {
+    if (!Number.isFinite(input.targetCount)) return 'target_count 必须是数字'
+    if (!Number.isInteger(input.targetCount) || input.targetCount < 1) {
+      return 'target_count 必须是 ≥1 的整数（0 或负数会让这条帖子永远派不出去）'
+    }
+    if (input.targetCount > 1000) return 'target_count 过大（上限 1000）'
+  }
+  return null
+}
+
 /** 新增帖子 */
 export async function createPost(input: PostInput): Promise<OpResult> {
   const sql = db()
   const url = (input.url ?? '').trim()
   const city = (input.city ?? '').trim()
   if (!url) return { ok: false, error: 'url 不能为空' }
-  if (!city) return { ok: false, error: 'city 不能为空' }
+  const invalid = validatePostInput({ city, targetCount: input.targetCount })
+  if (invalid) return { ok: false, error: invalid }
   const id = (input.id ?? '').trim() || makeId('post')
-  const target = Number.isFinite(input.targetCount) ? Number(input.targetCount) : 12
+  const target = input.targetCount === undefined ? 12 : Number(input.targetCount)
   try {
     await sql`
       INSERT INTO posts (id, url, city, post_type, title, target_count, status, created_by)
@@ -459,7 +521,13 @@ export async function updatePost(id: string, patch: Partial<PostInput>): Promise
   const sql = db()
   const url = patch.url?.trim() || null
   const city = patch.city?.trim() || null
-  const target = Number.isFinite(patch.targetCount) ? Number(patch.targetCount) : null
+  const invalid = validatePostInput({
+    url: patch.url,
+    city: patch.city,
+    targetCount: patch.targetCount,
+  })
+  if (invalid) return { ok: false, error: invalid }
+  const target = patch.targetCount === undefined ? null : Number(patch.targetCount)
   try {
     const rows = (await sql`
       UPDATE posts SET

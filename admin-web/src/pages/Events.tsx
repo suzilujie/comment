@@ -1,13 +1,24 @@
 import { api, fmtTime, statusTone } from '../api'
-import { Badge, Btn, Card, Empty, ErrorBox, Pager, Spinner, Table, Td, useFetch, usePaging } from '../ui'
+import {
+  Badge,
+  Btn,
+  Card,
+  Empty,
+  ErrorBox,
+  Pager,
+  shortId,
+  Spinner,
+  Table,
+  Td,
+  useFetch,
+  usePaging,
+} from '../ui'
 
 interface Props {
   autoMs: number
   refreshKey: number
   notify: (text: string, tone?: 'ok' | 'err' | 'info') => void
 }
-
-const shortId = (id: string | null) => (!id ? '-' : id.length > 12 ? `${id.slice(0, 8)}…` : id)
 
 function detailText(detail: unknown): string {
   if (detail === null || detail === undefined) return ''
